@@ -1,0 +1,29 @@
+name: dcs_packages
+repository: https://github.com/MahmoodBakhshayesh/dcs_packages
+
+packages:
+  - packages/**
+  - apps/**
+
+command:
+  bootstrap:
+    usePubspecOverrides: true
+
+scripts:
+  test:
+    run: melos exec --fail-fast -- dart test
+    description: Run dart tests in pure-Dart packages.
+    packageFilters:
+      dirExists: test
+      flutter: false
+
+  test:flutter:
+    run: melos exec --fail-fast -- flutter test
+    description: Run flutter tests in Flutter packages.
+    packageFilters:
+      dirExists: test
+      flutter: true
+
+  analyze:
+    run: melos exec -- dart analyze .
+    description: Run analyzer in all packages.

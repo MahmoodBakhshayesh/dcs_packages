@@ -1,0 +1,80 @@
+import 'cupps_models.dart';
+
+enum CuppsDeviceVisualStatus {
+  natural('natural'),
+  active('active'),
+  disconnect('disconnect'),
+  initializing('in'),
+  locked('locked'),
+  dataAvailable('data_available'),
+  printing('printing'),
+  configuring('configuring'),
+  inUse('inuse'),
+  jammed('jammed'),
+  open('open'),
+  paperOut('paper_out'),
+  failed('failed');
+
+  const CuppsDeviceVisualStatus(this.fileSuffix);
+
+  final String fileSuffix;
+}
+
+class CuppsStatusAssets {
+  const CuppsStatusAssets._();
+
+  static const package = 'dcs_cupps';
+  static const basePath = 'assets/images/icons';
+
+  static String unknown() => '$basePath/unknown.png';
+
+  static String forDeviceCode(
+    String deviceCode,
+    CuppsDeviceVisualStatus status,
+  ) {
+    return '$basePath/$deviceCode/${deviceCode}_${status.fileSuffix}.png';
+  }
+
+  static String forDeviceType(
+    CuppsDeviceType type,
+    CuppsDeviceVisualStatus status,
+  ) {
+    if (type == CuppsDeviceType.unknown) return unknown();
+    return forDeviceCode(type.code, status);
+  }
+
+  static String forDeviceStatus(CuppsDeviceStatus status) {
+    return forDeviceType(
+      status.device.type,
+      visualStatusForDeviceStatus(status),
+    );
+  }
+
+  static CuppsDeviceVisualStatus visualStatusForDeviceStatus(
+    CuppsDeviceStatus status,
+  ) {
+    if (status.lastError != null || status.state == CuppsDeviceState.failed) {
+      return CuppsDeviceVisualStatus.failed;
+    }
+    if (status.locked || status.state == CuppsDeviceState.locked) {
+      return CuppsDeviceVisualStatus.locked;
+    }
+    return switch (status.state) {
+      CuppsDeviceState.unknown ||
+      CuppsDeviceState.discovered => CuppsDeviceVisualStatus.natural,
+      CuppsDeviceState.connecting ||
+      CuppsDeviceState.initializing ||
+      CuppsDeviceState.acquiring => CuppsDeviceVisualStatus.initializing,
+      CuppsDeviceState.connected ||
+      CuppsDeviceState.initialized ||
+      CuppsDeviceState.acquired => CuppsDeviceVisualStatus.active,
+      CuppsDeviceState.locking ||
+      CuppsDeviceState.busy => CuppsDeviceVisualStatus.configuring,
+      CuppsDeviceState.locked => CuppsDeviceVisualStatus.locked,
+      CuppsDeviceState.dataAvailable => CuppsDeviceVisualStatus.dataAvailable,
+      CuppsDeviceState.degraded => CuppsDeviceVisualStatus.inUse,
+      CuppsDeviceState.disconnected => CuppsDeviceVisualStatus.disconnect,
+      CuppsDeviceState.failed => CuppsDeviceVisualStatus.failed,
+    };
+  }
+}

@@ -1,0 +1,39 @@
+name: dcs_device_util
+description: Reliable device discovery, configuration, connection monitoring, and status UI helpers for desktop DCS Flutter applications.
+version: 0.1.0
+publish_to: none
+repository: https://github.com/MahmoodBakhshayesh/dcs_packages
+issue_tracker: https://github.com/MahmoodBakhshayesh/dcs_packages/issues
+homepage: https://github.com/MahmoodBakhshayesh/dcs_packages/tree/main/packages/dcs_device_util
+license: MIT
+topics:
+  - serial-port
+  - printer
+  - desktop
+  - device
+  - dcs
+
+environment:
+  sdk: ^3.12.0
+  flutter: ">=3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dcs_common:
+    git:
+      url: https://github.com/MahmoodBakhshayesh/dcs_packages.git
+      path: packages/dcs_common
+      ref: main
+  flutter_libserialport: ^0.6.0
+  meta: ^1.18.0
+  shared_preferences: ^2.5.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  assets:
+    - assets/devices/

@@ -1,0 +1,26 @@
+name: dcs_cute
+description: CUTE/MATIP socket utilities and certification rule helpers for Flutter DCS applications.
+version: 0.1.0
+publish_to: none
+repository: https://github.com/MahmoodBakhshayesh/dcs_packages
+issue_tracker: https://github.com/MahmoodBakhshayesh/dcs_packages/issues
+homepage: https://github.com/MahmoodBakhshayesh/dcs_packages/tree/main/packages/dcs_cute
+license: MIT
+
+environment:
+  sdk: ^3.12.0
+  flutter: ">=3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dcs_common:
+    git:
+      url: https://github.com/MahmoodBakhshayesh/dcs_packages.git
+      path: packages/dcs_common
+      ref: main
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

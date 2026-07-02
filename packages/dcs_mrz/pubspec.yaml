@@ -1,0 +1,17 @@
+name: dcs_mrz
+description: Passport MRZ parsing and check-digit validation helpers for DCS applications.
+version: 1.0.0
+publish_to: none
+repository: https://github.com/MahmoodBakhshayesh/dcs_packages
+issue_tracker: https://github.com/MahmoodBakhshayesh/dcs_packages/issues
+homepage: https://github.com/MahmoodBakhshayesh/dcs_packages/tree/main/packages/dcs_mrz
+license: MIT
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6
