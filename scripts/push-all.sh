@@ -9,8 +9,12 @@
 #   chmod +x scripts/push-all.sh
 #   ./scripts/push-all.sh "fix: cupps reconnect"
 #
-# Windows (Git Bash — installed with Git for Windows):
-#   bash scripts/push-all.sh "fix: cupps reconnect"
+# Windows (recommended — PowerShell):
+#   .\scripts\push-all.ps1 "fix: cupps reconnect"
+#
+# Windows (Git Bash — do NOT use plain "bash"; that launches WSL):
+#   .\scripts\push-all.bat "fix: cupps reconnect"
+#   "C:\Program Files\Git\bin\bash.exe" scripts/push-all.sh "fix: cupps reconnect"
 #
 # Optional environment overrides:
 #   DCS_PACKAGES_DIR=/path/to/dcs-packages

@@ -137,7 +137,18 @@ melos bootstrap
 
 ## Push all projects to GitHub
 
-From the monorepo (macOS, Linux, or **Git Bash** on Windows):
+From the monorepo:
+
+**Windows (PowerShell — recommended):**
+
+```powershell
+cd dcs-packages
+.\scripts\push-all.ps1 "describe your changes"
+```
+
+Or double-click / run `scripts\push-all.bat` (uses Git Bash explicitly).
+
+**macOS / Linux / Git Bash:**
 
 ```bash
 cd dcs-packages
@@ -145,11 +156,7 @@ chmod +x scripts/push-all.sh   # once on Mac/Linux
 ./scripts/push-all.sh "describe your changes"
 ```
 
-Windows without chmod:
-
-```bash
-bash scripts/push-all.sh "describe your changes"
-```
+On Windows, plain `bash scripts/push-all.sh` often fails because `bash` resolves to WSL, not Git Bash.
 
 This commits and pushes **dcs-packages** and the sibling **dcs** app repository (if each has a `.git` folder).
 
