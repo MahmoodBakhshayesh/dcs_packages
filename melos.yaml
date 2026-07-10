@@ -3,7 +3,6 @@ repository: https://github.com/MahmoodBakhshayesh/dcs_packages
 
 packages:
   - packages/**
-  - apps/**
 
 command:
   bootstrap:

@@ -56,8 +56,26 @@ class CuppsStatusAssets {
     if (status.lastError != null || status.state == CuppsDeviceState.failed) {
       return CuppsDeviceVisualStatus.failed;
     }
+    if (status.printing) {
+      return CuppsDeviceVisualStatus.printing;
+    }
+    if (status.configuring) {
+      return CuppsDeviceVisualStatus.configuring;
+    }
     if (status.locked || status.state == CuppsDeviceState.locked) {
       return CuppsDeviceVisualStatus.locked;
+    }
+    final hardware = status.hardwareStatusLabel?.trim().toLowerCase();
+    if (hardware != null && hardware.isNotEmpty) {
+      if (hardware.contains('paper') && hardware.contains('out')) {
+        return CuppsDeviceVisualStatus.paperOut;
+      }
+      if (hardware.contains('jam')) return CuppsDeviceVisualStatus.jammed;
+      if (hardware.contains('open')) return CuppsDeviceVisualStatus.open;
+      if (hardware.contains('print')) return CuppsDeviceVisualStatus.printing;
+      if (hardware.contains('ready') || hardware.contains('active')) {
+        return CuppsDeviceVisualStatus.active;
+      }
     }
     return switch (status.state) {
       CuppsDeviceState.unknown ||

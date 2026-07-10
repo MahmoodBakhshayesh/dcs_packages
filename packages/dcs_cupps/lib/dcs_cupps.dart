@@ -1,4 +1,5 @@
 export 'src/cupps_client.dart';
+export 'src/cupps_configure.dart';
 export 'src/cupps_device.dart';
 export 'src/cupps_framing.dart';
 export 'src/cupps_logger.dart';

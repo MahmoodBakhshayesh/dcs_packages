@@ -74,6 +74,8 @@ class CuppsConnectionOptions {
     this.interfaceLevel = '01.03',
     this.hsXsdVersion = '01.01.0128',
     this.autoReconnect = true,
+    this.autoRestartOnSessionFault = true,
+    this.sessionFaultRestartDelay = const Duration(seconds: 5),
     this.requiredDeviceTypes = const {
       CuppsDeviceType.boardingPassPrinter,
       CuppsDeviceType.bagTagPrinter,
@@ -96,6 +98,8 @@ class CuppsConnectionOptions {
   final String interfaceLevel;
   final String hsXsdVersion;
   final bool autoReconnect;
+  final bool autoRestartOnSessionFault;
+  final Duration sessionFaultRestartDelay;
   final Set<CuppsDeviceType> requiredDeviceTypes;
 }
 
@@ -196,6 +200,14 @@ class CuppsDeviceDescriptor {
 
   String get id => '$index:$name';
   CuppsEndpoint get endpoint => CuppsEndpoint(host: ip, port: port);
+
+  /// Device sockets use the connected platform host and the device-specific port.
+  CuppsEndpoint connectionEndpoint(CuppsEndpoint platformEndpoint) {
+    return CuppsEndpoint(
+      host: platformEndpoint.host,
+      port: port,
+    );
+  }
 }
 
 class CuppsDeviceStatus {
@@ -206,6 +218,9 @@ class CuppsDeviceStatus {
     this.locked = false,
     this.acquired = false,
     this.initialized = false,
+    this.configuring = false,
+    this.printing = false,
+    this.hardwareStatusLabel,
     this.lastChangedAt,
     this.lastError,
   });
@@ -216,6 +231,9 @@ class CuppsDeviceStatus {
   final bool locked;
   final bool acquired;
   final bool initialized;
+  final bool configuring;
+  final bool printing;
+  final String? hardwareStatusLabel;
   final DateTime? lastChangedAt;
   final Object? lastError;
 
@@ -225,9 +243,13 @@ class CuppsDeviceStatus {
     bool? locked,
     bool? acquired,
     bool? initialized,
+    bool? configuring,
+    bool? printing,
+    String? hardwareStatusLabel,
     DateTime? lastChangedAt,
     Object? lastError,
     bool clearError = false,
+    bool clearHardwareStatus = false,
   }) {
     return CuppsDeviceStatus(
       device: device,
@@ -236,6 +258,11 @@ class CuppsDeviceStatus {
       locked: locked ?? this.locked,
       acquired: acquired ?? this.acquired,
       initialized: initialized ?? this.initialized,
+      configuring: configuring ?? this.configuring,
+      printing: printing ?? this.printing,
+      hardwareStatusLabel: clearHardwareStatus
+          ? null
+          : hardwareStatusLabel ?? this.hardwareStatusLabel,
       lastChangedAt: lastChangedAt ?? DateTime.now(),
       lastError: clearError ? null : lastError ?? this.lastError,
     );
@@ -248,13 +275,17 @@ class CuppsCommandResult {
     required this.result,
     required this.rawXml,
     this.message,
+    this.aeaText,
   });
 
   final bool ok;
   final String result;
   final String rawXml;
   final String? message;
+  final String? aeaText;
 }
+
+enum CuppsAeaWaitKind { print, configure }
 
 class CuppsRequestFailure implements Exception {
   const CuppsRequestFailure(this.message, {this.cause});

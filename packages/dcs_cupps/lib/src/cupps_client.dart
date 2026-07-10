@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'cupps_configure.dart';
 import 'cupps_device.dart';
 import 'cupps_framing.dart';
 import 'cupps_logger.dart';
@@ -37,6 +38,9 @@ class CuppsClient implements CuppsDeviceCommandSender {
   final _devices = <String, CuppsDevice>{};
   final _deviceStatuses = <String, CuppsDeviceStatus>{};
   final _deviceSessions = <String, _CuppsSocketSession>{};
+  final _aeaWaits = <String, Map<CuppsAeaWaitKind, Completer<CuppsCommandResult>>>{};
+  final _sessionFaultRestartTimers = <String, Timer>{};
+  final _restartingDevices = <String>{};
 
   _CuppsSocketSession? _platformSession;
   CuppsApplicationInfo? _application;
@@ -159,10 +163,11 @@ class CuppsClient implements CuppsDeviceCommandSender {
       );
 
     for (final descriptor in descriptors) {
+      final endpoint = _deviceConnectionEndpoint(descriptor);
       updateDeviceStatus(
         descriptor,
         CuppsDeviceState.discovered,
-        'Device discovered at ${descriptor.endpoint}.',
+        'Device discovered at $endpoint.',
         clearError: true,
       );
     }
@@ -183,9 +188,9 @@ class CuppsClient implements CuppsDeviceCommandSender {
       clearError: true,
     );
 
-    for (final device in _devices.values) {
-      await _connectDevice(device.descriptor);
-    }
+    await Future.wait(
+      _devices.values.map((device) => _connectDevice(device.descriptor)),
+    );
 
     _setPlatformStatus(
       CuppsPlatformState.ready,
@@ -193,6 +198,170 @@ class CuppsClient implements CuppsDeviceCommandSender {
       clearError: true,
     );
     _startHeartbeat();
+  }
+
+  /// Acquire, set interface mode, and refresh status for every connected device.
+  Future<void> initializeDevices({
+    required String deviceToken,
+    required String airlineId,
+  }) async {
+    await Future.wait(
+      _devices.values.map((device) async {
+        try {
+          await device.initialize(
+            deviceToken: deviceToken,
+            airlineId: airlineId,
+          );
+        } catch (error, stackTrace) {
+          logger(
+            CuppsLogLevel.warning,
+            CuppsLogScope.device,
+            'Device ${device.descriptor.name} initialization failed.',
+            deviceId: device.id,
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }),
+    );
+
+    await Future.wait(
+      _devices.values.map((device) async {
+        if (!device.supportsDeviceLock) return;
+        final current = _deviceStatuses[device.id];
+        if (current?.acquired != true) return;
+        try {
+          await device.lock();
+        } catch (error, stackTrace) {
+          logger(
+            CuppsLogLevel.warning,
+            CuppsLogScope.device,
+            'Device ${device.descriptor.name} lock failed after init.',
+            deviceId: device.id,
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }),
+    );
+  }
+
+  /// Send AEA configure commands to acquired BP/BT/BG devices.
+  Future<void> configureDevices({
+    required CuppsConfigurePlan plan,
+    bool tolerateMissingDeviceAck = true,
+    bool waitForReady = false,
+    Duration readyTimeout = const Duration(seconds: 5),
+  }) async {
+    if (plan.isEmpty) return;
+
+    await Future.wait(
+      _devices.values.map((device) async {
+        final commands = plan.commandsFor(device.type);
+        if (commands.isEmpty) return;
+
+        final current = _deviceStatuses[device.id];
+        if (current?.acquired != true) {
+          logger(
+            CuppsLogLevel.warning,
+            CuppsLogScope.device,
+            'Skipping configure for ${device.descriptor.name}; device not acquired.',
+            deviceId: device.id,
+          );
+          return;
+        }
+
+        try {
+          final result = await device.completeConfigure(
+            commands,
+            tolerateMissingDeviceAck: tolerateMissingDeviceAck,
+          );
+          if (!result.ok) {
+            logger(
+              CuppsLogLevel.warning,
+              CuppsLogScope.device,
+              'Configure failed for ${device.descriptor.name}: ${result.message}',
+              deviceId: device.id,
+            );
+            return;
+          }
+
+          if (!waitForReady) return;
+
+          if (device.type == CuppsDeviceType.boardingPassPrinter ||
+              device.type == CuppsDeviceType.bagTagPrinter) {
+            final ready = await device.waitForHardwareStatus(
+              'ready',
+              timeout: readyTimeout,
+            );
+            logger(
+              ready ? CuppsLogLevel.info : CuppsLogLevel.warning,
+              CuppsLogScope.device,
+              ready
+                  ? '${device.descriptor.name} reported ready after configure.'
+                  : '${device.descriptor.name} did not report ready after configure.',
+              deviceId: device.id,
+              data: {'hardware': device.status?.hardwareStatusLabel},
+            );
+          }
+        } catch (error, stackTrace) {
+          logger(
+            CuppsLogLevel.warning,
+            CuppsLogScope.device,
+            'Configure exception for ${device.descriptor.name}.',
+            deviceId: device.id,
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }),
+    );
+  }
+
+  @override
+  void registerInboundAeaWait(String deviceId, CuppsAeaWaitKind kind) {
+    final waits = _aeaWaits.putIfAbsent(deviceId, () => {});
+    waits.remove(kind)?.complete(
+      const CuppsCommandResult(
+        ok: false,
+        result: 'superseded',
+        rawXml: '',
+        message: 'Superseded by a newer AEA wait.',
+      ),
+    );
+    waits[kind] = Completer<CuppsCommandResult>();
+  }
+
+  @override
+  void cancelInboundAeaWait(String deviceId, CuppsAeaWaitKind kind) {
+    final waits = _aeaWaits[deviceId];
+    waits?.remove(kind);
+    if (waits != null && waits.isEmpty) {
+      _aeaWaits.remove(deviceId);
+    }
+  }
+
+  @override
+  Future<CuppsCommandResult> waitForInboundAea(
+    String deviceId,
+    CuppsAeaWaitKind kind, {
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    final completer = _aeaWaits[deviceId]?[kind];
+    if (completer == null) {
+      throw CuppsRequestFailure('No inbound AEA wait registered for $deviceId ($kind).');
+    }
+    try {
+      return await completer.future.timeout(timeout);
+    } on TimeoutException {
+      cancelInboundAeaWait(deviceId, kind);
+      return const CuppsCommandResult(
+        ok: false,
+        result: 'timeout',
+        rawXml: '',
+        message: 'Timed out waiting for device AEA acknowledgement.',
+      );
+    }
   }
 
   Future<CuppsCommandResult> sendPlatformRequest(
@@ -210,6 +379,154 @@ class CuppsClient implements CuppsDeviceCommandSender {
     return _resultFromXml(xml);
   }
 
+  /// Close the device socket and reset session flags.
+  @override
+  Future<void> closeDeviceSession(
+    String deviceId, {
+    bool notifyClosed = true,
+  }) async {
+    _cancelSessionFaultRestart(deviceId);
+    final device = _devices[deviceId]?.descriptor;
+    if (device == null) return;
+
+    final session = _deviceSessions.remove(deviceId);
+    _aeaWaits.remove(deviceId);
+    await session?.close(notify: notifyClosed);
+
+    if (!notifyClosed) {
+      updateDeviceStatus(
+        device,
+        CuppsDeviceState.disconnected,
+        'Device socket closed.',
+        locked: false,
+        acquired: false,
+        initialized: false,
+        clearError: true,
+        clearHardwareStatus: true,
+      );
+    }
+  }
+
+  /// Release, close, reconnect, and re-initialize one device (artemis restart parity).
+  @override
+  Future<CuppsCommandResult> restartDevice(
+    String deviceId, {
+    required String deviceToken,
+    required String airlineId,
+    bool relock = true,
+    List<String> configureCommands = const [],
+  }) async {
+    final cuppsDevice = _devices[deviceId];
+    if (cuppsDevice == null) {
+      return const CuppsCommandResult(
+        ok: false,
+        result: 'unknownDevice',
+        rawXml: '',
+        message: 'Device is not registered on this client.',
+      );
+    }
+
+    if (_restartingDevices.contains(deviceId)) {
+      return const CuppsCommandResult(
+        ok: false,
+        result: 'busy',
+        rawXml: '',
+        message: 'Device restart is already in progress.',
+      );
+    }
+
+    final current = _deviceStatuses[deviceId];
+    if (current?.printing == true || current?.configuring == true) {
+      return const CuppsCommandResult(
+        ok: false,
+        result: 'busy',
+        rawXml: '',
+        message: 'Cannot restart while the device is printing or configuring.',
+      );
+    }
+
+    _restartingDevices.add(deviceId);
+    _cancelSessionFaultRestart(deviceId);
+
+    try {
+      updateDeviceStatus(
+        cuppsDevice.descriptor,
+        CuppsDeviceState.busy,
+        'Restarting device session.',
+        clearError: true,
+      );
+
+      await cuppsDevice.release(closeSocket: true);
+
+      await _connectDevice(cuppsDevice.descriptor);
+      final init = await cuppsDevice.initialize(
+        deviceToken: deviceToken,
+        airlineId: airlineId,
+        forceAcquire: true,
+      );
+      if (!init.ok) {
+        updateDeviceStatus(
+          cuppsDevice.descriptor,
+          CuppsDeviceState.failed,
+          init.message ?? 'Device restart failed during initialize.',
+          error: init.message,
+        );
+        return init;
+      }
+
+      if (relock && cuppsDevice.supportsDeviceLock) {
+        final lockResult = await cuppsDevice.lock();
+        if (!lockResult.ok) {
+          logger(
+            CuppsLogLevel.warning,
+            CuppsLogScope.device,
+            'Device ${cuppsDevice.descriptor.name} lock failed after restart.',
+            deviceId: deviceId,
+            data: {'result': lockResult.result},
+          );
+        }
+      }
+
+      if (configureCommands.isNotEmpty) {
+        final configureResult = await cuppsDevice.completeConfigure(configureCommands);
+        if (!configureResult.ok) {
+          return configureResult;
+        }
+      }
+
+      updateDeviceStatus(
+        cuppsDevice.descriptor,
+        CuppsDeviceState.initialized,
+        'Device session restarted.',
+        acquired: true,
+        initialized: true,
+        clearError: true,
+      );
+
+      return CuppsCommandResult(
+        ok: true,
+        result: 'ok',
+        rawXml: '',
+        message: 'Device session restarted.',
+      );
+    } catch (error) {
+      updateDeviceStatus(
+        cuppsDevice.descriptor,
+        CuppsDeviceState.failed,
+        'Device restart failed.',
+        error: error,
+      );
+      return CuppsCommandResult(
+        ok: false,
+        result: 'restartFailed',
+        rawXml: '',
+        message: error.toString(),
+      );
+    } finally {
+      _restartingDevices.remove(deviceId);
+    }
+  }
+
   @override
   Future<CuppsCommandResult> sendDeviceRequest(
     CuppsDeviceDescriptor device,
@@ -220,8 +537,15 @@ class CuppsClient implements CuppsDeviceCommandSender {
   }) async {
     var session = _deviceSessions[device.id];
     if (session == null || !session.isOpen) {
-      await _connectDevice(device);
-      session = _deviceSessions[device.id];
+      final current = _deviceStatuses[device.id];
+      if (current?.acquired == true) {
+        await _restoreDeviceSession(device);
+        session = _deviceSessions[device.id];
+      } else {
+        throw CuppsRequestFailure(
+          'Device ${device.name} is not connected. Connect platform first.',
+        );
+      }
     }
     if (session == null || !session.isOpen) {
       throw CuppsRequestFailure('Device ${device.name} is not connected.');
@@ -240,6 +564,17 @@ class CuppsClient implements CuppsDeviceCommandSender {
       final xml = await session.request(
         buildXml,
         timeout ?? _options.requestTimeout,
+      );
+      final responseEnvelope = CuppsXml.parseEnvelope(xml);
+      logger(
+        CuppsLogLevel.debug,
+        CuppsLogScope.device,
+        'Device ${device.name} response: ${CuppsXml.messageLogSummary(responseEnvelope)}',
+        direction: CuppsMessageDirection.inbound,
+        deviceId: device.id,
+        messageId: responseEnvelope.messageId,
+        xml: xml,
+        data: CuppsXml.messageLogData(responseEnvelope),
       );
       final result = _resultFromXml(xml);
       if (!result.ok) {
@@ -292,8 +627,12 @@ class CuppsClient implements CuppsDeviceCommandSender {
     bool? locked,
     bool? acquired,
     bool? initialized,
+    bool? configuring,
+    bool? printing,
+    String? hardwareStatusLabel,
     Object? error,
     bool clearError = false,
+    bool clearHardwareStatus = false,
   }) {
     final previous = _deviceStatuses[device.id];
     final status = previous == null
@@ -304,6 +643,9 @@ class CuppsClient implements CuppsDeviceCommandSender {
             locked: locked ?? false,
             acquired: acquired ?? false,
             initialized: initialized ?? false,
+            configuring: configuring ?? false,
+            printing: printing ?? false,
+            hardwareStatusLabel: hardwareStatusLabel,
             lastChangedAt: DateTime.now(),
             lastError: clearError ? null : error,
           )
@@ -313,9 +655,13 @@ class CuppsClient implements CuppsDeviceCommandSender {
             locked: locked,
             acquired: acquired,
             initialized: initialized,
+            configuring: configuring,
+            printing: printing,
+            hardwareStatusLabel: hardwareStatusLabel,
             lastChangedAt: DateTime.now(),
             lastError: error,
             clearError: clearError,
+            clearHardwareStatus: clearHardwareStatus,
           );
     _deviceStatuses[device.id] = status;
     _deviceStatusesController.add(Map.unmodifiable(_deviceStatuses));
@@ -326,23 +672,57 @@ class CuppsClient implements CuppsDeviceCommandSender {
       message,
       deviceId: device.id,
       error: error,
-      data: {'state': state.name, 'deviceName': device.name},
+      data: {
+        'state': state.name,
+        'deviceName': device.name,
+        if (hardwareStatusLabel != null) 'hardwareStatus': hardwareStatusLabel,
+        if (locked == true || status.locked) 'locked': true,
+        if (acquired == true || status.acquired) 'acquired': true,
+        if (initialized == true || status.initialized) 'initialized': true,
+        if (configuring == true || status.configuring) 'configuring': true,
+        if (printing == true || status.printing) 'printing': true,
+      },
     );
   }
 
   Future<void> disconnect() async {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+    for (final timer in _sessionFaultRestartTimers.values) {
+      timer.cancel();
+    }
+    _sessionFaultRestartTimers.clear();
+    _restartingDevices.clear();
+
     _setPlatformStatus(
       CuppsPlatformState.disconnecting,
       'Disconnecting CUPPS platform and devices.',
     );
 
-    for (final session in _deviceSessions.values) {
-      await session.close();
+    for (final device in _devices.values) {
+      final current = _deviceStatuses[device.id];
+      if (current?.acquired != true) {
+        await closeDeviceSession(device.id, notifyClosed: false);
+        continue;
+      }
+      try {
+        await device.release(closeSocket: true);
+      } catch (error, stackTrace) {
+        logger(
+          CuppsLogLevel.warning,
+          CuppsLogScope.device,
+          'Failed to release ${device.descriptor.name} during disconnect.',
+          deviceId: device.id,
+          error: error,
+          stackTrace: stackTrace,
+        );
+        await closeDeviceSession(device.id, notifyClosed: false);
+      }
     }
+
     _deviceSessions.clear();
-    await _platformSession?.close();
+    _aeaWaits.clear();
+    await _platformSession?.close(notify: false);
     _platformSession = null;
 
     for (final status in _deviceStatuses.values.toList()) {
@@ -352,6 +732,7 @@ class CuppsClient implements CuppsDeviceCommandSender {
         'Device disconnected.',
         locked: false,
         acquired: false,
+        initialized: false,
       );
     }
 
@@ -372,11 +753,69 @@ class CuppsClient implements CuppsDeviceCommandSender {
     await logger.close();
   }
 
+  Future<void> _restoreDeviceSession(CuppsDeviceDescriptor device) async {
+    final cuppsDevice = _devices[device.id];
+    final token = _deviceToken;
+    final airline = _application?.airlineCode;
+    if (cuppsDevice == null || token == null || airline == null) {
+      throw const CuppsRequestFailure(
+        'Cannot restore device session before platform authentication.',
+      );
+    }
+
+    final existing = _deviceSessions[device.id];
+    final current = _deviceStatuses[device.id];
+    if (existing != null &&
+        existing.isOpen &&
+        current?.acquired == true &&
+        current?.initialized == true) {
+      return;
+    }
+
+    if (existing != null) {
+      await closeDeviceSession(device.id, notifyClosed: false);
+    }
+
+    await _connectDevice(device);
+    final acquire = await cuppsDevice.acquire(
+      deviceToken: token,
+      airlineId: airline,
+      force: true,
+    );
+    if (!acquire.ok) {
+      throw CuppsRequestFailure(
+        'Device ${device.name} re-acquire failed: ${acquire.result}',
+      );
+    }
+    final mode = await cuppsDevice.interfaceMode();
+    if (!mode.ok) {
+      throw CuppsRequestFailure(
+        'Device ${device.name} interface mode restore failed: ${mode.result}',
+      );
+    }
+    await cuppsDevice.refreshStatus();
+    if (cuppsDevice.supportsDeviceLock && current?.locked == true) {
+      await cuppsDevice.lock();
+    }
+  }
+
   Future<void> _connectDevice(CuppsDeviceDescriptor device) async {
+    final endpoint = _deviceConnectionEndpoint(device);
+    if (endpoint.host.trim().isEmpty || endpoint.port <= 0) {
+      throw CuppsRequestFailure(
+        'Device ${device.name} has no valid connection endpoint (host/port).',
+      );
+    }
+
+    final stale = _deviceSessions.remove(device.id);
+    if (stale != null) {
+      await stale.close(notify: false);
+    }
+
     updateDeviceStatus(
       device,
       CuppsDeviceState.connecting,
-      'Connecting to ${device.endpoint}.',
+      'Connecting to $endpoint.',
       clearError: true,
     );
 
@@ -389,18 +828,22 @@ class CuppsClient implements CuppsDeviceCommandSender {
       onUnmatchedMessage: (message) => _handleDeviceMessage(device, message),
       onClosed: () {
         _deviceSessions.remove(device.id);
+        _cancelSessionFaultRestart(device.id);
         updateDeviceStatus(
           device,
           CuppsDeviceState.disconnected,
           'Device socket closed.',
           locked: false,
           acquired: false,
+          initialized: false,
+          clearHardwareStatus: true,
         );
       },
     );
 
     try {
-      await session.connect(device.endpoint, timeout: _options.connectTimeout);
+      await session.connect(endpoint, timeout: _options.connectTimeout);
+      await _negotiateDeviceInterface(session, device);
       _deviceSessions[device.id] = session;
       updateDeviceStatus(
         device,
@@ -416,6 +859,50 @@ class CuppsClient implements CuppsDeviceCommandSender {
         error: error,
       );
       rethrow;
+    }
+  }
+
+  CuppsEndpoint _deviceConnectionEndpoint(CuppsDeviceDescriptor device) {
+    final platformEndpoint = _platformStatus.endpoint;
+    if (platformEndpoint == null) {
+      return device.endpoint;
+    }
+    return device.connectionEndpoint(platformEndpoint);
+  }
+
+  Future<void> _negotiateDeviceInterface(
+    _CuppsSocketSession session,
+    CuppsDeviceDescriptor device,
+  ) async {
+    final levelsXml = await session.request(
+      (messageId) => CuppsXml.interfaceLevelsAvailableRequest(
+        messageId: messageId,
+        hsXsdVersion: _options.hsXsdVersion,
+      ),
+      _options.requestTimeout,
+    );
+    final levels = CuppsXml.interfaceLevels(levelsXml);
+    final level = levels.contains(_options.interfaceLevel)
+        ? _options.interfaceLevel
+        : (levels.isNotEmpty ? levels.first : null);
+    if (level == null) {
+      throw CuppsRequestFailure(
+        'Device ${device.name} has no available interface levels.',
+      );
+    }
+
+    final selectedLevelXml = await session.request(
+      (messageId) => CuppsXml.interfaceLevelRequest(
+        messageId: messageId,
+        level: level,
+      ),
+      _options.requestTimeout,
+    );
+    final selected = _resultFromXml(selectedLevelXml);
+    if (!selected.ok) {
+      throw CuppsRequestFailure(
+        'Device ${device.name} interface level selection failed: ${selected.result}',
+      );
     }
   }
 
@@ -440,13 +927,17 @@ class CuppsClient implements CuppsDeviceCommandSender {
     }
 
     if (message.messageName == 'notify') {
+      _applyStatusFromNotify(message.rawXml);
       logger(
         CuppsLogLevel.info,
         CuppsLogScope.platform,
-        'Platform notification received.',
+        'Platform notify: ${CuppsXml.messageLogSummary(message)}',
+        direction: CuppsMessageDirection.inbound,
         messageId: message.messageId,
         xml: message.rawXml,
+        data: CuppsXml.messageLogData(message),
       );
+      return;
     }
   }
 
@@ -454,22 +945,259 @@ class CuppsClient implements CuppsDeviceCommandSender {
     CuppsDeviceDescriptor device,
     CuppsEnvelope message,
   ) async {
-    logger(
-      CuppsLogLevel.info,
-      CuppsLogScope.device,
-      'Device message received.',
-      deviceId: device.id,
-      messageId: message.messageId,
-      xml: message.rawXml,
-    );
+    if (message.messageName == 'aeaRequest') {
+      logger(
+        CuppsLogLevel.info,
+        CuppsLogScope.device,
+        'Device ${device.name} inbound AEA: ${CuppsXml.messageLogSummary(message)}',
+        direction: CuppsMessageDirection.inbound,
+        deviceId: device.id,
+        messageId: message.messageId,
+        xml: message.rawXml,
+        data: CuppsXml.messageLogData(message),
+      );
+      await _handleInboundAeaRequest(device, message);
+      return;
+    }
+
     if (message.messageName == 'notify') {
+      if (CuppsXml.isSessionFaultNotify(message)) {
+        await _handleDeviceSessionFault(device, message);
+        return;
+      }
+
+      final hardware = CuppsXml.hardwareStatusLabelFromNotify(message.rawXml);
+      _applyStatusFromNotify(message.rawXml);
       updateDeviceStatus(
         device,
         CuppsDeviceState.dataAvailable,
-        'Device data/notification received.',
+        'Device notify: ${CuppsXml.messageLogSummary(message)}',
+        hardwareStatusLabel: hardware,
         clearError: true,
       );
+      logger(
+        CuppsLogLevel.info,
+        CuppsLogScope.device,
+        'Device ${device.name} notify: ${CuppsXml.messageLogSummary(message)}',
+        direction: CuppsMessageDirection.inbound,
+        deviceId: device.id,
+        messageId: message.messageId,
+        xml: message.rawXml,
+        data: CuppsXml.messageLogData(message),
+      );
+      return;
     }
+
+    logger(
+      CuppsLogLevel.info,
+      CuppsLogScope.device,
+      'Device ${device.name} inbound: ${CuppsXml.messageLogSummary(message)}',
+      direction: CuppsMessageDirection.inbound,
+      deviceId: device.id,
+      messageId: message.messageId,
+      xml: message.rawXml,
+      data: CuppsXml.messageLogData(message),
+    );
+  }
+
+  void _applyStatusFromNotify(String rawXml) {
+    final deviceName = CuppsXml.deviceNameFromNotify(rawXml);
+    if (deviceName == null) return;
+
+    final device = _devices.values
+        .where((entry) => entry.descriptor.name == deviceName)
+        .map((entry) => entry.descriptor)
+        .firstOrNull;
+    if (device == null) return;
+
+    final label = CuppsXml.hardwareStatusLabelFromNotify(rawXml);
+    if (label == null) return;
+
+    final current = _deviceStatuses[device.id];
+    final ready = label.toLowerCase() == 'ready';
+
+    if (current?.configuring == true || current?.printing == true) {
+      updateDeviceStatus(
+        device,
+        current!.state,
+        'Status: $label',
+        hardwareStatusLabel: label,
+        clearError: ready,
+        error: ready ? null : label,
+      );
+      return;
+    }
+
+    updateDeviceStatus(
+      device,
+      ready ? CuppsDeviceState.initialized : CuppsDeviceState.degraded,
+      'Status: $label',
+      initialized: true,
+      hardwareStatusLabel: label,
+      clearError: ready,
+      error: ready ? null : label,
+    );
+  }
+
+  Future<void> _handleDeviceSessionFault(
+    CuppsDeviceDescriptor device,
+    CuppsEnvelope message,
+  ) async {
+    final description =
+        CuppsXml.sessionFaultDescription(message) ?? 'session fault';
+    final session = _deviceSessions[device.id];
+    final failure = CuppsRequestFailure('CUPPS session fault: $description');
+
+    session?.abortPending(failure);
+    await closeDeviceSession(device.id, notifyClosed: false);
+
+    updateDeviceStatus(
+      device,
+      CuppsDeviceState.degraded,
+      'CUPPS session fault: $description',
+      locked: false,
+      acquired: false,
+      initialized: false,
+      error: description,
+      clearHardwareStatus: true,
+    );
+
+    logger(
+      CuppsLogLevel.warning,
+      CuppsLogScope.device,
+      'Device ${device.name} session fault: $description',
+      direction: CuppsMessageDirection.inbound,
+      deviceId: device.id,
+      messageId: message.messageId,
+      xml: message.rawXml,
+      data: CuppsXml.messageLogData(message),
+    );
+
+    _scheduleSessionFaultRestart(device.id);
+  }
+
+  void _cancelSessionFaultRestart(String deviceId) {
+    _sessionFaultRestartTimers.remove(deviceId)?.cancel();
+  }
+
+  void _scheduleSessionFaultRestart(String deviceId) {
+    if (!_options.autoRestartOnSessionFault) return;
+    if (_deviceToken == null || _application == null) return;
+    if (_restartingDevices.contains(deviceId)) return;
+
+    _cancelSessionFaultRestart(deviceId);
+    _sessionFaultRestartTimers[deviceId] = Timer(
+      _options.sessionFaultRestartDelay,
+      () {
+        _sessionFaultRestartTimers.remove(deviceId);
+        final device = _devices[deviceId];
+        if (device == null) return;
+        if (_platformStatus.state != CuppsPlatformState.ready &&
+            _platformStatus.state != CuppsPlatformState.discoveringDevices) {
+          return;
+        }
+        restartDevice(
+          deviceId,
+          deviceToken: _deviceToken!,
+          airlineId: _application!.airlineCode,
+        ).ignore();
+      },
+    );
+  }
+
+  Future<void> _handleInboundAeaRequest(
+    CuppsDeviceDescriptor device,
+    CuppsEnvelope message,
+  ) async {
+    final session = _deviceSessions[device.id];
+    if (session != null) {
+      await session.respond(
+        CuppsXml.aeaResponse(messageId: message.messageId),
+      );
+    }
+
+    final texts = CuppsXml.aeaRequestTexts(message.rawXml);
+    if (texts.isEmpty) return;
+    final text = texts.join();
+    final upper = text.toUpperCase();
+
+    final waits = _aeaWaits[device.id];
+    if (waits == null || waits.isEmpty) {
+      logger(
+        CuppsLogLevel.debug,
+        CuppsLogScope.device,
+        'Inbound AEA with no pending waiter: $text',
+        deviceId: device.id,
+      );
+      return;
+    }
+
+    CuppsAeaWaitKind? matchedKind;
+    CuppsCommandResult? outcome;
+
+    if (waits.containsKey(CuppsAeaWaitKind.configure)) {
+      if (upper.contains('OK')) {
+        matchedKind = CuppsAeaWaitKind.configure;
+        outcome = CuppsCommandResult(
+          ok: true,
+          result: 'ok',
+          rawXml: message.rawXml,
+          message: 'Configuration OK',
+          aeaText: text,
+        );
+      } else if (upper.contains('ERR')) {
+        matchedKind = CuppsAeaWaitKind.configure;
+        outcome = CuppsCommandResult(
+          ok: false,
+          result: 'error',
+          rawXml: message.rawXml,
+          message: text,
+          aeaText: text,
+        );
+      }
+    }
+
+    if (matchedKind == null && waits.containsKey(CuppsAeaWaitKind.print)) {
+      if (upper.contains('PROK') && !upper.contains('PRERR')) {
+        matchedKind = CuppsAeaWaitKind.print;
+        outcome = CuppsCommandResult(
+          ok: true,
+          result: 'ok',
+          rawXml: message.rawXml,
+          message: 'Print OK',
+          aeaText: text,
+        );
+      } else if (upper.contains('ERR') || upper.contains('PRERR')) {
+        matchedKind = CuppsAeaWaitKind.print;
+        outcome = CuppsCommandResult(
+          ok: false,
+          result: 'error',
+          rawXml: message.rawXml,
+          message: text,
+          aeaText: text,
+        );
+      }
+    }
+
+    if (matchedKind == null || outcome == null) return;
+
+    final completer = waits.remove(matchedKind);
+    if (waits.isEmpty) {
+      _aeaWaits.remove(device.id);
+    }
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(outcome);
+    }
+
+    updateDeviceStatus(
+      device,
+      outcome.ok ? CuppsDeviceState.initialized : CuppsDeviceState.degraded,
+      outcome.message ?? (outcome.ok ? 'AEA complete.' : 'AEA failed.'),
+      configuring: matchedKind == CuppsAeaWaitKind.configure ? false : null,
+      printing: matchedKind == CuppsAeaWaitKind.print ? false : null,
+      clearError: outcome.ok,
+      error: outcome.ok ? null : outcome.message,
+    );
   }
 
   void _handlePlatformClosed(String message) {
@@ -627,15 +1355,17 @@ class _CuppsSocketSession {
     final xml = buildXml(messageId);
     final completer = Completer<String>();
     _pending[messageId] = completer;
+    final requestEnvelope = CuppsXml.parseEnvelope(xml);
 
     logger(
       CuppsLogLevel.debug,
       scope,
-      '$name request sent.',
+      '$name request: ${CuppsXml.messageLogSummary(requestEnvelope)}',
       direction: CuppsMessageDirection.outbound,
       deviceId: deviceId,
       messageId: messageId,
       xml: xml,
+      data: CuppsXml.messageLogData(requestEnvelope),
     );
 
     await transport.write(_codec.encode(xml));
@@ -660,13 +1390,16 @@ class _CuppsSocketSession {
     await transport.write(_codec.encode(xml));
   }
 
-  Future<void> close() async {
+  Future<void> close({bool notify = true}) async {
     if (_closed) return;
     _closed = true;
     await _subscription?.cancel();
     _subscription = null;
     await transport.close();
     _failPending(CuppsRequestFailure('$name socket closed.'));
+    if (notify) {
+      onClosed();
+    }
   }
 
   int _nextMessageId() {
@@ -683,11 +1416,12 @@ class _CuppsSocketSession {
         logger(
           CuppsLogLevel.debug,
           scope,
-          '$name message received.',
+          '$name inbound: ${CuppsXml.messageLogSummary(envelope)}',
           direction: CuppsMessageDirection.inbound,
           deviceId: deviceId,
           messageId: envelope.messageId,
           xml: xml,
+          data: CuppsXml.messageLogData(envelope),
         );
 
         final completer = _pending.remove(envelope.messageId);
@@ -743,5 +1477,9 @@ class _CuppsSocketSession {
         completer.completeError(error);
       }
     }
+  }
+
+  void abortPending(CuppsRequestFailure failure) {
+    _failPending(failure);
   }
 }

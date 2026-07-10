@@ -20,7 +20,7 @@ Repository: [github.com/MahmoodBakhshayesh/dcs_packages](https://github.com/Mahm
 | [dcs_cute](packages/dcs_cute) | CUTE/MATIP socket client | Flutter |
 | [dcs_device_util](packages/dcs_device_util) | Desktop serial/USB device management | Flutter |
 
-The reference DCS application lives in [`apps/dcs`](apps/dcs).
+The reference DCS application lives separately at [`../dcs`](../dcs) (sibling folder) and consumes these packages via git dependencies.
 
 ## Use in another project (git)
 
@@ -130,10 +130,28 @@ melos bootstrap
 ```
 
 - Edit any package under `packages/`
-- Run the app: `cd apps/dcs && flutter run`
+- Run the app: `cd ../dcs && flutter run`
 - Run tests: `melos run test`
 
 `melos bootstrap` links local packages together (overrides git dependencies with local paths).
+
+## Push all projects to GitHub
+
+From the monorepo (macOS, Linux, or **Git Bash** on Windows):
+
+```bash
+cd dcs-packages
+chmod +x scripts/push-all.sh   # once on Mac/Linux
+./scripts/push-all.sh "describe your changes"
+```
+
+Windows without chmod:
+
+```bash
+bash scripts/push-all.sh "describe your changes"
+```
+
+This commits and pushes **dcs-packages** and the sibling **dcs** app repository (if each has a `.git` folder).
 
 ## Releasing
 
