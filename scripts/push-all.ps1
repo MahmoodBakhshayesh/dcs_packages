@@ -30,12 +30,12 @@ function Push-Repo {
     )
 
     if (-not (Test-Path -LiteralPath $Dir)) {
-        Write-Host "[skip] $Name — directory not found: $Dir"
+        Write-Host "[skip] $Name - directory not found: $Dir"
         return
     }
 
     if (-not (Test-Path -LiteralPath (Join-Path $Dir ".git"))) {
-        Write-Host "[skip] $Name — not a git repository: $Dir"
+        Write-Host "[skip] $Name - not a git repository: $Dir"
         return
     }
 
@@ -76,7 +76,7 @@ function Push-Repo {
 
         $currentBranch = git rev-parse --abbrev-ref HEAD
         if ($currentBranch -eq "HEAD") {
-            throw "Detached HEAD — cannot push branch. Checkout a branch first."
+            throw "Detached HEAD - cannot push branch. Checkout a branch first."
         }
 
         Write-Host "Pushing to origin/$currentBranch..."
