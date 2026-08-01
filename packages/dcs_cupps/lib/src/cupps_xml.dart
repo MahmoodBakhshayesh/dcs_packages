@@ -203,11 +203,37 @@ class CuppsXml {
     return _emptyBody(messageId, 'deviceReleaseRequest');
   }
 
-  static String aeaRequest({required int messageId, required String command}) {
+  /// Builds a CUPPS `aeaRequest` with schema-valid nesting:
+  /// `aeaRequest` → `aeaMessage(+)` → `aeaText` | `aeaBinary`.
+  ///
+  /// Pass [command] for a single message, or [commands] for multiple
+  /// `aeaMessage` children (`maxOccurs="unbounded"` in cupps-01.03).
+  static String aeaRequest({
+    required int messageId,
+    String? command,
+    List<String>? commands,
+  }) {
+    final texts = <String>[
+      if (commands != null) ...commands.map((c) => c.replaceAll('\r', '').trim()),
+      if (command != null) command.replaceAll('\r', '').trim(),
+    ].where((c) => c.isNotEmpty).toList(growable: false);
+
+    if (texts.isEmpty) {
+      throw ArgumentError('aeaRequest requires at least one non-empty command');
+    }
+
+    final messages = texts
+        .map(
+          (text) => XmlElement(XmlName('aeaMessage'), [], [
+            XmlElement(XmlName('aeaText'), [], [XmlText(text)]),
+          ]),
+        )
+        .toList(growable: false);
+
     return _document(
       messageId: messageId,
       messageName: 'aeaRequest',
-      body: XmlElement(XmlName('aeaRequest'), [], [XmlText(command)]),
+      body: XmlElement(XmlName('aeaRequest'), [], messages),
     );
   }
 
@@ -217,22 +243,39 @@ class CuppsXml {
     String documentId = '',
     String stockName = '',
   }) {
+    final resolvedDocumentId =
+        documentId.trim().isEmpty ? 'doc-$messageId' : documentId.trim();
+    final resolvedStockName =
+        stockName.trim().isEmpty ? 'default' : stockName.trim();
+
     return _document(
       messageId: messageId,
       messageName: 'printRequest',
-      body: XmlElement(
-        XmlName('printRequest'),
-        [
-          XmlAttribute(XmlName('documentID'), documentId),
-          XmlAttribute(XmlName('stockName'), stockName),
-        ],
-        [XmlText(document)],
-      ),
+      body: XmlElement(XmlName('printRequest'), [], [
+        XmlElement(
+          XmlName('printDocument'),
+          [
+            XmlAttribute(XmlName('documentID'), resolvedDocumentId),
+            XmlAttribute(XmlName('stockName'), resolvedStockName),
+          ],
+          [
+            XmlElement(XmlName('simpleTextPrintDocument'), [], [
+              XmlElement(XmlName('simpleTextPrintDocumentNode'), [], [
+                XmlElement(
+                  XmlName('simpleTextPrintDocumentTextNode'),
+                  [],
+                  [XmlText(document)],
+                ),
+              ]),
+            ]),
+          ],
+        ),
+      ]),
     );
   }
 
   static String byeRequest({required int messageId}) {
-    return _emptyBody(messageId, 'bye');
+    return _emptyBody(messageId, 'byeRequest');
   }
 
   static String applicationStopCommandResponse({
@@ -267,13 +310,30 @@ class CuppsXml {
     return _attr(response, 'result') ?? '';
   }
 
+  /// Extracts AEA text payloads from an `aeaRequest` (inbound or outbound).
+  ///
+  /// Prefers nested `aeaText` nodes per cupps-01.03. Falls back to direct
+  /// text under `aeaRequest` for legacy flat messages.
   static List<String> aeaRequestTexts(String xml) {
     final document = XmlDocument.parse(xml);
     final element = document.findAllElements('aeaRequest').firstOrNull;
     if (element == null) return const [];
-    return element.innerText.trim().isEmpty
-        ? const []
-        : [element.innerText.trim()];
+
+    final nested = element
+        .findAllElements('aeaText')
+        .map((node) => node.innerText.trim())
+        .where((text) => text.isNotEmpty)
+        .toList(growable: false);
+    if (nested.isNotEmpty) return nested;
+
+    // Legacy: <aeaRequest>EP#...</aeaRequest> with no aeaMessage wrapper.
+    final hasMessageChildren = element.childElements.any(
+      (child) => child.name.local == 'aeaMessage',
+    );
+    if (hasMessageChildren) return const [];
+
+    final flat = element.innerText.trim();
+    return flat.isEmpty ? const [] : [flat];
   }
 
   static String? deviceHardwareStatusLabel(String xml, CuppsDeviceType type) {

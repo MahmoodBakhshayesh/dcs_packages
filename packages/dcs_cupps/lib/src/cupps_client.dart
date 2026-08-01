@@ -35,6 +35,7 @@ class CuppsClient implements CuppsDeviceCommandSender {
       StreamController<Map<String, CuppsDeviceStatus>>.broadcast();
   final _deviceStatusControllers =
       <String, StreamController<CuppsDeviceStatus>>{};
+  final _scanEventsController = StreamController<CuppsScanEvent>.broadcast();
   final _devices = <String, CuppsDevice>{};
   final _deviceStatuses = <String, CuppsDeviceStatus>{};
   final _deviceSessions = <String, _CuppsSocketSession>{};
@@ -57,6 +58,9 @@ class CuppsClient implements CuppsDeviceCommandSender {
 
   Stream<Map<String, CuppsDeviceStatus>> get deviceStatuses =>
       _deviceStatusesController.stream;
+
+  /// Unsolicited barcode / OCR / reader payloads (MRZ, boarding pass, etc.).
+  Stream<CuppsScanEvent> get scanEvents => _scanEventsController.stream;
 
   Map<String, CuppsDeviceStatus> get currentDeviceStatuses =>
       Map.unmodifiable(_deviceStatuses);
@@ -747,6 +751,7 @@ class CuppsClient implements CuppsDeviceCommandSender {
     await disconnect();
     await _platformStatusController.close();
     await _deviceStatusesController.close();
+    await _scanEventsController.close();
     for (final controller in _deviceStatusControllers.values) {
       await controller.close();
     }
@@ -1123,6 +1128,15 @@ class CuppsClient implements CuppsDeviceCommandSender {
 
     final waits = _aeaWaits[device.id];
     if (waits == null || waits.isEmpty) {
+      if (!_scanEventsController.isClosed) {
+        _scanEventsController.add(
+          CuppsScanEvent(
+            deviceId: device.id,
+            deviceType: device.type,
+            text: text,
+          ),
+        );
+      }
       logger(
         CuppsLogLevel.debug,
         CuppsLogScope.device,

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:xml/xml.dart';
 
 import 'package:dcs_cupps/dcs_cupps.dart';
 
@@ -225,12 +226,95 @@ void main() {
 
     const aeaXml = '''
 <cupps messageName="aeaRequest" messageID="7">
-  <aeaRequest>EP#AIRLINEID=IR#HARDCODE=HDC</aeaRequest>
+  <aeaRequest>
+    <aeaMessage>
+      <aeaText>EP#AIRLINEID=IR#HARDCODE=HDC</aeaText>
+    </aeaMessage>
+  </aeaRequest>
 </cupps>
 ''';
     final aeaSummary = CuppsXml.messageLogSummaryFromXml(aeaXml);
     expect(aeaSummary, contains('aeaRequest'));
     expect(aeaSummary, contains('EP#AIRLINEID=IR'));
+  });
+
+  test('aeaRequest builds nested aeaMessage/aeaText per cupps-01.03', () {
+    final xml = CuppsXml.aeaRequest(
+      messageId: 9,
+      command: 'EP#AIRLINEID=ZZ#HARDCODE=HDC#FONT=L',
+    );
+    final document = XmlDocument.parse(xml);
+    final request = document.findAllElements('aeaRequest').single;
+    expect(request.childElements, hasLength(1));
+    expect(request.childElements.single.name.local, 'aeaMessage');
+    expect(
+      request.findAllElements('aeaText').single.innerText,
+      'EP#AIRLINEID=ZZ#HARDCODE=HDC#FONT=L',
+    );
+    // Must not put command as a direct text child of aeaRequest.
+    expect(
+      request.children.whereType<XmlText>().map((t) => t.value.trim()).where((t) => t.isNotEmpty),
+      isEmpty,
+    );
+  });
+
+  test('aeaRequest supports multiple aeaMessage children', () {
+    final xml = CuppsXml.aeaRequest(
+      messageId: 10,
+      commands: const ['ST#A#B', 'EP#AIRLINEID=IR#HARDCODE=HDC'],
+    );
+    final texts = CuppsXml.aeaRequestTexts(xml);
+    expect(texts, ['ST#A#B', 'EP#AIRLINEID=IR#HARDCODE=HDC']);
+  });
+
+  test('aeaRequestTexts reads nested aeaText and legacy flat payload', () {
+    const nested = '''
+<cupps messageName="aeaRequest" messageID="9">
+  <aeaRequest>
+    <aeaMessage>
+      <aeaText>LT5002780A050101</aeaText>
+    </aeaMessage>
+  </aeaRequest>
+</cupps>
+''';
+    expect(CuppsXml.aeaRequestTexts(nested), ['LT5002780A050101']);
+
+    const legacy = '''
+<cupps messageName="aeaRequest" messageID="7">
+  <aeaRequest>EP#AIRLINEID=IR#HARDCODE=HDC</aeaRequest>
+</cupps>
+''';
+    expect(CuppsXml.aeaRequestTexts(legacy), ['EP#AIRLINEID=IR#HARDCODE=HDC']);
+  });
+
+  test('byeRequest uses byeRequest element and messageName', () {
+    final xml = CuppsXml.byeRequest(messageId: 12);
+    final envelope = CuppsXml.parseEnvelope(xml);
+    expect(envelope.messageName, 'byeRequest');
+    expect(XmlDocument.parse(xml).findAllElements('byeRequest'), hasLength(1));
+    expect(XmlDocument.parse(xml).findAllElements('bye'), isEmpty);
+  });
+
+  test('printRequest nests printDocument/simpleTextPrintDocument per cupps-01.03', () {
+    final xml = CuppsXml.printRequest(
+      messageId: 11,
+      document: 'HELLO WORLD',
+      documentId: 'doc-1',
+      stockName: 'A4',
+    );
+    final document = XmlDocument.parse(xml);
+    final printRequest = document.findAllElements('printRequest').single;
+    final printDocument = printRequest.findAllElements('printDocument').single;
+    expect(printDocument.getAttribute('documentID'), 'doc-1');
+    expect(printDocument.getAttribute('stockName'), 'A4');
+    expect(
+      printDocument.findAllElements('simpleTextPrintDocumentTextNode').single.innerText,
+      'HELLO WORLD',
+    );
+    expect(
+      printRequest.children.whereType<XmlText>().map((t) => t.value.trim()).where((t) => t.isNotEmpty),
+      isEmpty,
+    );
   });
 
   test('status asset resolver prefers configuring and printing flags', () {

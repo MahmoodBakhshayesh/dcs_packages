@@ -65,6 +65,19 @@ enum CuppsLogScope { platform, device, protocol, socket, lifecycle }
 
 enum CuppsMessageDirection { inbound, outbound, internal }
 
+/// Payload from an unsolicited inbound AEA (scanner / reader).
+class CuppsScanEvent {
+  const CuppsScanEvent({
+    required this.deviceId,
+    required this.deviceType,
+    required this.text,
+  });
+
+  final String deviceId;
+  final CuppsDeviceType deviceType;
+  final String text;
+}
+
 class CuppsConnectionOptions {
   const CuppsConnectionOptions({
     this.connectTimeout = const Duration(seconds: 10),

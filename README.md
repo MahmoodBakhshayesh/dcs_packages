@@ -18,6 +18,7 @@ Repository: [github.com/MahmoodBakhshayesh/dcs_packages](https://github.com/Mahm
 | [dcs_simulator](packages/dcs_simulator) | In-memory device and host simulators | Dart |
 | [dcs_cupps](packages/dcs_cupps) | CUPPS socket/XML platform client | Flutter |
 | [dcs_cute](packages/dcs_cute) | CUTE/MATIP socket client | Flutter |
+| [dcs_cute_peripherals](packages/dcs_cute_peripherals) | CUTE peripherals: ARINC TCP, SITA/RESA FFI | Flutter |
 | [dcs_device_util](packages/dcs_device_util) | Desktop serial/USB device management | Flutter |
 
 The reference DCS application lives separately at [`../dcs`](../dcs) (sibling folder) and consumes these packages via git dependencies.
