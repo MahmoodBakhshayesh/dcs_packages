@@ -9,3 +9,13 @@ export 'src/resa/resa_client.dart';
 export 'src/resa/resa_device.dart';
 export 'src/sita/sita_client.dart';
 export 'src/sita/sita_device.dart';
+export 'src/sita/sita_ffi.dart'
+    show
+        kCuteNtSdkVersion,
+        SitaXspmBindings,
+        SitaConfiguredDevice,
+        SitaDeviceDescription,
+        SitaDeviceStatusBits,
+        sitaGetConfiguredDevices,
+        sitaGetDeviceDescription,
+        sitaNotifyApplicationState;

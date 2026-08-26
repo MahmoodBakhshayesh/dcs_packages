@@ -149,6 +149,9 @@ class ArincDevice implements CutePeripheral {
   }
 
   @override
+  Future<void> flush() async {}
+
+  @override
   Future<void> write(List<int> bytes, {bool endDoc = false}) async {
     final wrapped = AeaHelpers.wrapArincAea(bytes);
     await _sendAndWaitAck(

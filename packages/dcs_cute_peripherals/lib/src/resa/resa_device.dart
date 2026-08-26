@@ -124,6 +124,9 @@ class ResaDevice implements CutePeripheral {
   }
 
   @override
+  Future<void> flush() async {}
+
+  @override
   Future<void> write(List<int> bytes, {bool endDoc = false}) async {
     final api = _requireApi();
     final typePtr = _typeToken.toNativeUtf8();

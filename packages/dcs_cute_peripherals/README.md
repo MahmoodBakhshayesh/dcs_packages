@@ -5,7 +5,7 @@ CUTE workstation peripheral clients for Flutter DCS:
 | Vendor | Transport | Package API |
 |--------|-----------|-------------|
 | **ARINC / MUSE** | Pure Dart TCP (PCP32 RQB) | `CutePeripheral.arinc` / `ArincClient` |
-| **SITA** | Windows FFI → `xspmapi.dll` | `CutePeripheral.sita` / `SitaClient` |
+| **SITA** | Windows FFI → `xspmapi.dll` (CUTE/NT SDK **1.34**) | `CutePeripheral.sita` / `SitaClient` |
 | **RESA** | Windows FFI → `crwnt_dm.dll` | `CutePeripheral.resa` / `ResaClient` |
 
 This is separate from `dcs_cute` (MATIP host messaging) and `dcs_cupps` (CUPPS/ITPS XML).
@@ -38,21 +38,45 @@ Requires a reachable MUSE/PCP32 service on the CUTE workstation.
 
 ## SITA (Windows + `xspmapi.dll`)
 
+Bindings match CUTE/NT SDK 1.34 `XSPMAPI.H` (sample `TSTPMAPI`).
+
 ```dart
 final device = CutePeripheral.sita(
   identity: const CutePeripheralIdentity(
     kind: CutePeripheralKind.btp,
     name: 'BTP1',
-    airlineCode: 'IR',
+    airlineCode: 'IR', // required: 2–3 letter designator configured in CUTENT\AIRLINES
   ),
 );
 await device.open();
 await device.lock();
 await device.writeAea('BT...AEA...');
+await device.unlock(); // XSPMFlush(PM_FLUSHLOCK) — there is no XSPMUnlock
+await device.flush();  // optional full flush
 await device.close();
 ```
 
-`xspmapi.dll` (and the SITA CUTE Peripheral Manager) must already be installed on the PC. Legacy `SitaCoreLibrary.dll` is not used by the live path.
+Helpers:
+
+- `sitaGetConfiguredDevices()` / `sitaGetDeviceDescription(name)`
+- `sitaNotifyApplicationState(airlineCode:, active:)`
+- `kCuteNtSdkVersion` → `'1.34'`
+
+### Workstation prerequisites (SDK setup)
+
+1. Install CUTE/NT SDK 1.34; start **SITA Peripheral Manager** (`xswinpm.exe` / service).
+2. Registry under `HKLM\SOFTWARE\SITAAPS\CUTENT\` (32-bit OS) or
+   `HKLM\SOFTWARE\WOW6432Node\SITAAPS\CUTENT\` (64-bit OS).
+3. Rename workstation key under `CUTENT\WORKSTATIONS` (10-char name).
+4. Rename airline key under `AIRLINES` (e.g. `XS` → your 2-letter code).
+5. Configure COM ports / devices; devices must be **COM** (or virtual COM) — USB-native is unsupported.
+6. Validate with `TSTPMAPI` (Open with device name + airline code).
+
+### Architecture note (critical)
+
+CUTE typically installs a **32-bit** `xspmapi.dll` (WOW6432Node). A **64-bit** Flutter Windows
+process cannot load a 32-bit DLL. For SITA peripherals you need a matching bitness host
+(32-bit helper process, or a 64-bit PM DLL if your site provides one).
 
 ## RESA (Windows + `crwnt_dm.dll`)
 
@@ -76,7 +100,7 @@ Device type tokens: `RTE`, `BPP`, `BTP`, `DCP`, `BCD`.
 All vendors implement `CutePeripheral`:
 
 - `open` / `close` / `dispose`
-- `lock` / `unlock`
+- `lock` / `unlock` / `flush`
 - `write` / `writeAea`
 - `read` / `queryStatus`
 - `statusChanges` / `data` streams

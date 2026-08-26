@@ -16,6 +16,10 @@ abstract class CutePeripheral {
   Future<void> open();
   Future<void> lock({Duration timeout = const Duration(seconds: 10)});
   Future<void> unlock();
+
+  /// Vendor flush (SITA: `XSPMFlush`; ARINC/RESA: no-op unless overridden).
+  Future<void> flush();
+
   Future<void> write(List<int> bytes, {bool endDoc = false});
   Future<void> writeAea(String command, {bool endDoc = false, bool frame = true});
   Future<List<int>?> read({Duration timeout = const Duration(seconds: 5)});
