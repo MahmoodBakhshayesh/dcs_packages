@@ -525,13 +525,16 @@ class CuppsDevice {
           _sender.cancelInboundAeaWait(id, CuppsAeaWaitKind.configure);
         }
       }
-    } finally {
+    } catch (error) {
       _sender.updateDeviceStatus(
         descriptor,
-        CuppsDeviceState.busy,
-        'Configure sequence finished.',
+        CuppsDeviceState.failed,
+        'Configure sequence failed.',
         configuring: false,
+        error: error,
+        clearError: false,
       );
+      rethrow;
     }
 
     final result = lastResult ??
@@ -548,7 +551,17 @@ class CuppsDevice {
         CuppsDeviceState.initialized,
         'Device configured.',
         initialized: true,
+        configuring: false,
         clearError: true,
+      );
+    } else {
+      _sender.updateDeviceStatus(
+        descriptor,
+        CuppsDeviceState.degraded,
+        result.message ?? 'Configure sequence failed.',
+        configuring: false,
+        error: result.result,
+        clearError: false,
       );
     }
 

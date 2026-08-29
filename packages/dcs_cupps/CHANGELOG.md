@@ -1,3 +1,8 @@
+## 0.1.3
+
+* **Configure / print as one status period** — while `configuring` or `printing` is set, intermediate `sendDeviceRequest` successes no longer flip the device to `initialized` (avoids busy↔initialized flicker during multi-command init).
+* **`completeConfigure`** — keeps `configuring: true` for the whole command list and only clears it on the final success/failure status.
+
 ## 0.1.2
 
 * Align `aeaRequest` with cupps-01.03 (`aeaMessage` / `aeaText`).

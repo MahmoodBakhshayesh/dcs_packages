@@ -590,13 +590,25 @@ class CuppsClient implements CuppsDeviceCommandSender {
           clearError: false,
         );
       } else if (busyState != null) {
-        updateDeviceStatus(
-          device,
-          CuppsDeviceState.initialized,
-          'Device request completed.',
-          initialized: true,
-          clearError: true,
-        );
+        final current = _deviceStatuses[device.id];
+        // Multi-step configure/print sequences own the status until they finish.
+        // Do not flicker busy → initialized after every intermediate command.
+        if (current?.configuring == true || current?.printing == true) {
+          updateDeviceStatus(
+            device,
+            busyState,
+            busyMessage ?? 'Device request completed.',
+            clearError: true,
+          );
+        } else {
+          updateDeviceStatus(
+            device,
+            CuppsDeviceState.initialized,
+            'Device request completed.',
+            initialized: true,
+            clearError: true,
+          );
+        }
       }
       return result;
     } catch (error) {
