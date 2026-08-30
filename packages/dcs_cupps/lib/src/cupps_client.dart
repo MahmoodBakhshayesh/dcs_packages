@@ -1349,7 +1349,11 @@ class CuppsClient implements CuppsDeviceCommandSender {
     }
 
     if (matchedKind == null && waits.containsKey(CuppsAeaWaitKind.print)) {
-      if (upper.contains('PROK') && !upper.contains('PRERR')) {
+      // IATA AEA uses PROK; HDC/BOCA-style printers often reply HDCPTOK… / PTOK.
+      final printOk = (upper.contains('PROK') || upper.contains('PTOK')) &&
+          !upper.contains('PRERR') &&
+          !upper.contains('PTERR');
+      if (printOk) {
         matchedKind = CuppsAeaWaitKind.print;
         outcome = CuppsCommandResult(
           ok: true,
@@ -1358,7 +1362,9 @@ class CuppsClient implements CuppsDeviceCommandSender {
           message: 'Print OK',
           aeaText: text,
         );
-      } else if (upper.contains('ERR') || upper.contains('PRERR')) {
+      } else if (upper.contains('ERR') ||
+          upper.contains('PRERR') ||
+          upper.contains('PTERR')) {
         matchedKind = CuppsAeaWaitKind.print;
         outcome = CuppsCommandResult(
           ok: false,

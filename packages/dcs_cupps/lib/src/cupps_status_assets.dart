@@ -62,9 +62,6 @@ class CuppsStatusAssets {
     if (status.configuring) {
       return CuppsDeviceVisualStatus.configuring;
     }
-    if (status.locked || status.state == CuppsDeviceState.locked) {
-      return CuppsDeviceVisualStatus.locked;
-    }
     final hardware = status.hardwareStatusLabel?.trim().toLowerCase();
     if (hardware != null && hardware.isNotEmpty) {
       if (hardware.contains('paper') && hardware.contains('out')) {
@@ -73,9 +70,25 @@ class CuppsStatusAssets {
       if (hardware.contains('jam')) return CuppsDeviceVisualStatus.jammed;
       if (hardware.contains('open')) return CuppsDeviceVisualStatus.open;
       if (hardware.contains('print')) return CuppsDeviceVisualStatus.printing;
+      // Platform `ready="true"` / "Device is Ready" — prefer over lock badge.
       if (hardware.contains('ready') || hardware.contains('active')) {
         return CuppsDeviceVisualStatus.active;
       }
+      if (hardware.contains('offline') || hardware.contains('power')) {
+        return CuppsDeviceVisualStatus.disconnect;
+      }
+    }
+    // Persistent lock is normal for BC/BG readers — treat as ready/active.
+    if (status.locked || status.state == CuppsDeviceState.locked) {
+      final type = status.device.type;
+      if (type == CuppsDeviceType.barcodeReader ||
+          type == CuppsDeviceType.boardingGateReader ||
+          type == CuppsDeviceType.opticalCardReader ||
+          type == CuppsDeviceType.passportReader ||
+          type == CuppsDeviceType.biometricReader) {
+        return CuppsDeviceVisualStatus.active;
+      }
+      return CuppsDeviceVisualStatus.locked;
     }
     return switch (status.state) {
       CuppsDeviceState.unknown ||

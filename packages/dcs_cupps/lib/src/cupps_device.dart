@@ -631,7 +631,7 @@ class CuppsDevice {
     Duration? timeout,
     bool useAea = true,
     bool tolerateMissingDeviceAck = true,
-    Duration deviceAckTimeout = const Duration(milliseconds: 500),
+    Duration deviceAckTimeout = const Duration(seconds: 8),
   }) async {
     if (useAea) {
       if (status?.acquired != true) {
@@ -665,28 +665,36 @@ class CuppsDevice {
         final ackTimeout = tolerateMissingDeviceAck
             ? deviceAckTimeout
             : (timeout ?? const Duration(seconds: 20));
+        CuppsCommandResult ack;
         try {
-          return await _sender.waitForInboundAea(
+          ack = await _sender.waitForInboundAea(
             id,
             CuppsAeaWaitKind.print,
             timeout: ackTimeout,
           );
         } catch (_) {
-          if (tolerateMissingDeviceAck) {
-            return CuppsCommandResult(
-              ok: true,
-              result: outbound.result,
-              rawXml: outbound.rawXml,
-              message: 'Print accepted (outbound OK).',
-            );
-          }
-          return const CuppsCommandResult(
+          ack = const CuppsCommandResult(
             ok: false,
             result: 'timeout',
             rawXml: '',
             message: 'Timed out waiting for print acknowledgement.',
           );
         }
+
+        if (ack.ok) return ack;
+
+        // Platform often accepts the print (outbound aeaResponse OK) before the
+        // device unsolicited AEA arrives — or some printers never send PROK/PTOK.
+        if (tolerateMissingDeviceAck) {
+          return CuppsCommandResult(
+            ok: true,
+            result: outbound.result,
+            rawXml: outbound.rawXml,
+            message: 'Print accepted (outbound OK).',
+            aeaText: ack.aeaText,
+          );
+        }
+        return ack;
       } finally {
         _sender.cancelInboundAeaWait(id, CuppsAeaWaitKind.print);
         _sender.updateDeviceStatus(
