@@ -42,6 +42,9 @@ class CuppsClient implements CuppsDeviceCommandSender {
   final _aeaWaits = <String, Map<CuppsAeaWaitKind, Completer<CuppsCommandResult>>>{};
   final _sessionFaultRestartTimers = <String, Timer>{};
   final _restartingDevices = <String>{};
+  /// Devices that should stay locked until unlock / release / disconnect.
+  final _persistentLockDeviceIds = <String>{};
+  final _relockInFlight = <String>{};
 
   _CuppsSocketSession? _platformSession;
   CuppsApplicationInfo? _application;
@@ -49,6 +52,7 @@ class CuppsClient implements CuppsDeviceCommandSender {
   String? _applicationToken;
   String? _deviceToken;
   Timer? _heartbeatTimer;
+  Timer? _lockRenewTimer;
   var _platformStatus = const CuppsPlatformStatus.idle();
 
   Stream<CuppsPlatformStatus> get platformStatus =>
@@ -202,6 +206,7 @@ class CuppsClient implements CuppsDeviceCommandSender {
       clearError: true,
     );
     _startHeartbeat();
+    _startLockRenew();
   }
 
   /// Acquire, set interface mode, and refresh status for every connected device.
@@ -631,6 +636,116 @@ class CuppsClient implements CuppsDeviceCommandSender {
   }
 
   @override
+  void setPersistentLockDesired(String deviceId, bool desired) {
+    if (desired) {
+      _persistentLockDeviceIds.add(deviceId);
+    } else {
+      _persistentLockDeviceIds.remove(deviceId);
+      _relockInFlight.remove(deviceId);
+    }
+  }
+
+  /// Show lines on the first acquired BG / DD device (boarding gate display).
+  Future<CuppsCommandResult?> displayMessage(
+    List<String> lines, {
+    bool clearFirst = true,
+  }) async {
+    CuppsDevice? device;
+    for (final candidate in _devices.values) {
+      if (!candidate.supportsDisplay) continue;
+      if (_deviceStatuses[candidate.id]?.acquired != true) continue;
+      device = candidate;
+      break;
+    }
+    if (device == null) return null;
+    return device.displayLines(lines, clearFirst: clearFirst);
+  }
+
+  void _startLockRenew() {
+    _lockRenewTimer?.cancel();
+    _lockRenewTimer = Timer.periodic(_options.lockRenewInterval, (_) {
+      unawaited(_renewPersistentLocks());
+    });
+  }
+
+  Future<void> _renewPersistentLocks() async {
+    if (_persistentLockDeviceIds.isEmpty) return;
+    final ids = List<String>.from(_persistentLockDeviceIds);
+    for (final id in ids) {
+      final device = _devices[id];
+      if (device == null || !device.supportsDeviceLock) continue;
+      final status = _deviceStatuses[id];
+      if (status?.acquired != true) continue;
+      try {
+        await device.lock(renew: status?.locked == true);
+      } catch (error, stackTrace) {
+        logger(
+          CuppsLogLevel.warning,
+          CuppsLogScope.device,
+          'Persistent lock renew failed for ${device.descriptor.name}.',
+          deviceId: id,
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+  }
+
+  Future<void> _relockIfDesired(CuppsDevice device) async {
+    final id = device.id;
+    if (!_persistentLockDeviceIds.contains(id)) return;
+    if (!device.supportsDeviceLock) return;
+    if (_relockInFlight.contains(id)) return;
+    _relockInFlight.add(id);
+    try {
+      await device.lock(renew: false);
+    } catch (error, stackTrace) {
+      logger(
+        CuppsLogLevel.warning,
+        CuppsLogScope.device,
+        'Auto re-lock failed for ${device.descriptor.name}.',
+        deviceId: id,
+        error: error,
+        stackTrace: stackTrace,
+      );
+    } finally {
+      _relockInFlight.remove(id);
+    }
+  }
+
+  void _emitScan(CuppsDeviceDescriptor device, String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    if (_scanEventsController.isClosed) return;
+    _scanEventsController.add(
+      CuppsScanEvent(
+        deviceId: device.id,
+        deviceType: device.type,
+        text: trimmed,
+      ),
+    );
+  }
+
+  Future<void> _pullReaderData(CuppsDevice device) async {
+    if (!device.supportsBarcodeRead) return;
+    try {
+      final result = await device.readWaitingData();
+      for (final text in CuppsXml.bcDataTexts(result.rawXml)) {
+        _emitScan(device.descriptor, text);
+      }
+    } catch (error, stackTrace) {
+      logger(
+        CuppsLogLevel.debug,
+        CuppsLogScope.device,
+        'readerRead failed for ${device.descriptor.name}.',
+        deviceId: device.id,
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  @override
   CuppsDeviceStatus? currentDeviceStatus(String deviceId) {
     return _deviceStatuses[deviceId];
   }
@@ -704,6 +819,10 @@ class CuppsClient implements CuppsDeviceCommandSender {
   Future<void> disconnect() async {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+    _lockRenewTimer?.cancel();
+    _lockRenewTimer = null;
+    _persistentLockDeviceIds.clear();
+    _relockInFlight.clear();
     for (final timer in _sessionFaultRestartTimers.values) {
       timer.cancel();
     }
@@ -983,15 +1102,9 @@ class CuppsClient implements CuppsDeviceCommandSender {
         return;
       }
 
-      final hardware = CuppsXml.hardwareStatusLabelFromNotify(message.rawXml);
-      _applyStatusFromNotify(message.rawXml);
-      updateDeviceStatus(
-        device,
-        CuppsDeviceState.dataAvailable,
-        'Device notify: ${CuppsXml.messageLogSummary(message)}',
-        hardwareStatusLabel: hardware,
-        clearError: true,
-      );
+      final notifyEvent = CuppsXml.notifyEventNameFromXml(message.rawXml) ?? '';
+      final cuppsDevice = _devices[device.id];
+
       logger(
         CuppsLogLevel.info,
         CuppsLogScope.device,
@@ -1002,6 +1115,66 @@ class CuppsClient implements CuppsDeviceCommandSender {
         xml: message.rawXml,
         data: CuppsXml.messageLogData(message),
       );
+
+      // Platform lock TTL (~60s): clear flag and re-lock if we want persistence.
+      if (notifyEvent == 'deviceLockExpiredEvent') {
+        updateDeviceStatus(
+          device,
+          CuppsDeviceState.initialized,
+          'Device lock expired — renewing.',
+          locked: false,
+          clearError: true,
+        );
+        if (cuppsDevice != null) {
+          unawaited(_relockIfDesired(cuppsDevice));
+        }
+        return;
+      }
+
+      // Scan arrived while unlocked — data already discarded by platform.
+      if (notifyEvent == 'dataAvailableNoLockerEvent') {
+        updateDeviceStatus(
+          device,
+          CuppsDeviceState.dataAvailable,
+          'Scan discarded (device not locked) — re-locking.',
+          locked: false,
+          clearError: true,
+        );
+        if (cuppsDevice != null) {
+          unawaited(_relockIfDesired(cuppsDevice));
+        }
+        return;
+      }
+
+      final barcodes = CuppsXml.bcDataTexts(message.rawXml);
+      if (barcodes.isNotEmpty) {
+        for (final text in barcodes) {
+          _emitScan(device, text);
+        }
+        updateDeviceStatus(
+          device,
+          CuppsDeviceState.dataAvailable,
+          'Barcode data received.',
+          clearError: true,
+        );
+        return;
+      }
+
+      final hardware = CuppsXml.hardwareStatusLabelFromNotify(message.rawXml);
+      _applyStatusFromNotify(message.rawXml);
+      updateDeviceStatus(
+        device,
+        CuppsDeviceState.dataAvailable,
+        'Device notify: ${CuppsXml.messageLogSummary(message)}',
+        hardwareStatusLabel: hardware,
+        clearError: true,
+      );
+
+      // Locked reader with data-available notify but no embedded bcData → pull.
+      final locked = _deviceStatuses[device.id]?.locked == true;
+      if (locked && cuppsDevice != null && cuppsDevice.supportsBarcodeRead) {
+        unawaited(_pullReaderData(cuppsDevice));
+      }
       return;
     }
 
@@ -1140,15 +1313,7 @@ class CuppsClient implements CuppsDeviceCommandSender {
 
     final waits = _aeaWaits[device.id];
     if (waits == null || waits.isEmpty) {
-      if (!_scanEventsController.isClosed) {
-        _scanEventsController.add(
-          CuppsScanEvent(
-            deviceId: device.id,
-            deviceType: device.type,
-            text: text,
-          ),
-        );
-      }
+      _emitScan(device, text);
       logger(
         CuppsLogLevel.debug,
         CuppsLogScope.device,

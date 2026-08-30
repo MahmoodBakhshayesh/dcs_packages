@@ -84,6 +84,8 @@ class CuppsConnectionOptions {
     this.requestTimeout = const Duration(seconds: 12),
     this.heartbeatInterval = const Duration(seconds: 45),
     this.heartbeatTimeout = const Duration(seconds: 12),
+    /// Renew device locks before platform expiry (common platforms use ~60s).
+    this.lockRenewInterval = const Duration(seconds: 30),
     this.interfaceLevel = '01.03',
     this.hsXsdVersion = '01.01.0128',
     this.autoReconnect = true,
@@ -108,6 +110,7 @@ class CuppsConnectionOptions {
   final Duration requestTimeout;
   final Duration heartbeatInterval;
   final Duration heartbeatTimeout;
+  final Duration lockRenewInterval;
   final String interfaceLevel;
   final String hsXsdVersion;
   final bool autoReconnect;

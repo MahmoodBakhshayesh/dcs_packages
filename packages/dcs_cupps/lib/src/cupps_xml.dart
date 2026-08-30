@@ -173,6 +173,53 @@ class CuppsXml {
     return _emptyBody(messageId, 'deviceUnlockRequest');
   }
 
+  static String readerReadRequest({required int messageId}) {
+    return _emptyBody(messageId, 'readerReadRequest');
+  }
+
+  static String ddClearScreenRequest({required int messageId}) {
+    return _emptyBody(messageId, 'ddClearScreenRequest');
+  }
+
+  /// CUPPS `ddDisplayRequest` with `lineText` children (1-based line attribute).
+  static String ddDisplayRequest({
+    required int messageId,
+    required List<String> lines,
+  }) {
+    final children = <XmlNode>[];
+    for (var i = 0; i < lines.length; i++) {
+      final text = lines[i].trim();
+      if (text.isEmpty) continue;
+      children.add(
+        XmlElement(
+          XmlName('lineText'),
+          [XmlAttribute(XmlName('line'), '${i + 1}')],
+          [XmlText(text)],
+        ),
+      );
+    }
+    return _document(
+      messageId: messageId,
+      messageName: 'ddDisplayRequest',
+      body: XmlElement(XmlName('ddDisplayRequest'), [], children),
+    );
+  }
+
+  /// Barcode payloads from `bcData` elements (notify / readerReadResponse).
+  static List<String> bcDataTexts(String xml) {
+    final document = XmlDocument.parse(xml);
+    final out = <String>[];
+    for (final element in document.findAllElements('bcData')) {
+      final text = element.innerText.trim();
+      if (text.isNotEmpty) out.add(text);
+    }
+    return out;
+  }
+
+  static String? notifyEventNameFromXml(String xml) {
+    return _notifyEventName(XmlDocument.parse(xml));
+  }
+
   static String interfaceModeRequest({
     required int messageId,
     required String mode,

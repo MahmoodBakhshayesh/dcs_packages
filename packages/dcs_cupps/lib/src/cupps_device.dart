@@ -55,6 +55,9 @@ abstract interface class CuppsDeviceCommandSender {
     bool relock = true,
     List<String> configureCommands = const [],
   });
+
+  /// When true, client keeps re-locking until unlock/release/disconnect.
+  void setPersistentLockDesired(String deviceId, bool desired);
 }
 
 class CuppsDevice {
@@ -207,12 +210,24 @@ class CuppsDevice {
         type == CuppsDeviceType.bagTagPrinter;
   }
 
-  /// BP/BT printers do not use deviceLock in CUPPS; BC/OC/MS/PR do.
+  /// BP/BT printers do not use deviceLock in CUPPS; readers / BG / PR do.
   bool get supportsDeviceLock {
     return type == CuppsDeviceType.barcodeReader ||
+        type == CuppsDeviceType.boardingGateReader ||
         type == CuppsDeviceType.opticalCardReader ||
         type == CuppsDeviceType.passportReader ||
         type == CuppsDeviceType.documentPrinter;
+  }
+
+  /// BG embeds DD; standalone DD also supports CUPPS display requests.
+  bool get supportsDisplay {
+    return type == CuppsDeviceType.boardingGateReader ||
+        type == CuppsDeviceType.displayDevice;
+  }
+
+  bool get supportsBarcodeRead {
+    return type == CuppsDeviceType.barcodeReader ||
+        type == CuppsDeviceType.boardingGateReader;
   }
 
   Future<bool> waitForHardwareStatus(
@@ -295,7 +310,7 @@ class CuppsDevice {
     return result;
   }
 
-  Future<CuppsCommandResult> lock({Duration? timeout}) async {
+  Future<CuppsCommandResult> lock({Duration? timeout, bool renew = false}) async {
     if (!supportsDeviceLock) {
       return const CuppsCommandResult(
         ok: false,
@@ -306,16 +321,20 @@ class CuppsDevice {
     }
     final result = await _sender.sendDeviceRequest(
       descriptor,
-      (messageId) => CuppsXml.deviceLockRequest(messageId: messageId),
+      (messageId) => CuppsXml.deviceLockRequest(
+        messageId: messageId,
+        renew: renew,
+      ),
       timeout: timeout,
       busyState: CuppsDeviceState.locking,
-      busyMessage: 'Locking device.',
+      busyMessage: renew ? 'Renewing device lock.' : 'Locking device.',
     );
     if (result.ok) {
+      _sender.setPersistentLockDesired(id, true);
       _sender.updateDeviceStatus(
         descriptor,
         CuppsDeviceState.locked,
-        'Device locked.',
+        renew ? 'Device lock renewed.' : 'Device locked.',
         locked: true,
         clearError: true,
       );
@@ -332,6 +351,7 @@ class CuppsDevice {
         message: 'Unlock not required for this device type.',
       );
     }
+    _sender.setPersistentLockDesired(id, false);
     final result = await _sender.sendDeviceRequest(
       descriptor,
       (messageId) => CuppsXml.deviceUnlockRequest(messageId: messageId),
@@ -362,6 +382,8 @@ class CuppsDevice {
     bool closeSocket = true,
   }) async {
     CuppsCommandResult? result;
+
+    _sender.setPersistentLockDesired(id, false);
 
     if (status?.acquired == true) {
       if (status?.locked == true) {
@@ -689,6 +711,91 @@ class CuppsDevice {
       busyMessage: 'Printing document.',
     );
     return result;
+  }
+
+  /// CUPPS `ddDisplayRequest` — BG (embedded DD) or standalone display.
+  Future<CuppsCommandResult> displayLines(
+    List<String> lines, {
+    Duration? timeout,
+    bool clearFirst = true,
+  }) async {
+    if (!supportsDisplay) {
+      return const CuppsCommandResult(
+        ok: false,
+        result: 'illogicalAction',
+        rawXml: '',
+        message: 'This device type does not support display.',
+      );
+    }
+    if (status?.acquired != true) {
+      return const CuppsCommandResult(
+        ok: false,
+        result: 'notAcquired',
+        rawXml: '',
+        message: 'Device must be acquired before display.',
+      );
+    }
+    if (clearFirst) {
+      await clearDisplay(timeout: timeout);
+    }
+    final sanitized = [
+      for (final line in lines) line.replaceAll('\r', ' ').trim(),
+    ].where((l) => l.isNotEmpty).take(8).toList(growable: false);
+    return _sender.sendDeviceRequest(
+      descriptor,
+      (messageId) => CuppsXml.ddDisplayRequest(
+        messageId: messageId,
+        lines: sanitized,
+      ),
+      timeout: timeout,
+      busyState: CuppsDeviceState.busy,
+      busyMessage: 'Updating display.',
+    );
+  }
+
+  Future<CuppsCommandResult> clearDisplay({Duration? timeout}) async {
+    if (!supportsDisplay) {
+      return const CuppsCommandResult(
+        ok: true,
+        result: 'ok',
+        rawXml: '',
+        message: 'Clear display not required for this device type.',
+      );
+    }
+    if (status?.acquired != true) {
+      return const CuppsCommandResult(
+        ok: false,
+        result: 'notAcquired',
+        rawXml: '',
+        message: 'Device must be acquired before clear display.',
+      );
+    }
+    return _sender.sendDeviceRequest(
+      descriptor,
+      (messageId) => CuppsXml.ddClearScreenRequest(messageId: messageId),
+      timeout: timeout,
+      busyState: CuppsDeviceState.busy,
+      busyMessage: 'Clearing display.',
+    );
+  }
+
+  /// Pull waiting barcode data after a data-available notify (when locked).
+  Future<CuppsCommandResult> readWaitingData({Duration? timeout}) async {
+    if (!supportsBarcodeRead) {
+      return const CuppsCommandResult(
+        ok: false,
+        result: 'illogicalAction',
+        rawXml: '',
+        message: 'This device type does not support readerRead.',
+      );
+    }
+    return _sender.sendDeviceRequest(
+      descriptor,
+      (messageId) => CuppsXml.readerReadRequest(messageId: messageId),
+      timeout: timeout,
+      busyState: CuppsDeviceState.busy,
+      busyMessage: 'Reading barcode data.',
+    );
   }
 
   String _resolveInterfaceMode(String? mode) {
