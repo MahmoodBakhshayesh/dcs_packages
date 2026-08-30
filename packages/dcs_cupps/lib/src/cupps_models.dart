@@ -32,6 +32,61 @@ enum CuppsDeviceState {
   failed,
 }
 
+/// Classifies CUPPS hardware status strings from status/acquire notifies.
+abstract final class CuppsHardwareStatus {
+  static String normalize(String? label) => (label ?? '').trim().toLowerCase();
+
+  static bool isOffline(String? label) {
+    final h = normalize(label);
+    if (h.isEmpty) return false;
+    return h.contains('poweroff') ||
+        h.contains('power off') ||
+        h.contains('power_off') ||
+        h == 'poweroff' ||
+        h.contains('offline') ||
+        h.contains('powered off');
+  }
+
+  static bool isReady(String? label) {
+    final h = normalize(label);
+    return h == 'ready' || h.contains('device is ready') || h == 'active';
+  }
+
+  /// Locked / held by another CUPPS application or workstation.
+  static bool isInUseByOthers(String? label, {String? error, String? result}) {
+    final blob = [
+      normalize(label),
+      normalize(error),
+      normalize(result),
+    ].where((s) => s.isNotEmpty).join(' ');
+    if (blob.isEmpty) return false;
+    return blob.contains('in use') ||
+        blob.contains('inuse') ||
+        blob.contains('device_in_use') ||
+        blob.contains('already locked') ||
+        blob.contains('locked by') ||
+        blob.contains('another application') ||
+        blob.contains('another app') ||
+        blob.contains('other application') ||
+        blob.contains('other workstation');
+  }
+
+  /// User-facing device state when [CuppsDeviceState.degraded].
+  static String degradedDisplayLabel({
+    String? hardwareStatusLabel,
+    String? message,
+    Object? lastError,
+  }) {
+    if (isInUseByOthers(
+      hardwareStatusLabel,
+      error: '${message ?? ''} ${lastError ?? ''}',
+    )) {
+      return 'Locked by others';
+    }
+    return 'In use';
+  }
+}
+
 enum CuppsDeviceType {
   boardingPassPrinter('bp', 'bpDeviceParameter'),
   bagTagPrinter('bt', 'btDeviceParameter'),
@@ -91,6 +146,7 @@ class CuppsConnectionOptions {
     this.autoReconnect = true,
     this.autoRestartOnSessionFault = true,
     this.sessionFaultRestartDelay = const Duration(seconds: 5),
+    this.maxSessionFaultRestarts = 2,
     this.requiredDeviceTypes = const {
       CuppsDeviceType.boardingPassPrinter,
       CuppsDeviceType.bagTagPrinter,
@@ -116,6 +172,8 @@ class CuppsConnectionOptions {
   final bool autoReconnect;
   final bool autoRestartOnSessionFault;
   final Duration sessionFaultRestartDelay;
+  /// Cap auto restarts after session faults (avoids offline BG init loops).
+  final int maxSessionFaultRestarts;
   final Set<CuppsDeviceType> requiredDeviceTypes;
 }
 

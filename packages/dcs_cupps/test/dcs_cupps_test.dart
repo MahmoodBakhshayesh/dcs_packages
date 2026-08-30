@@ -317,7 +317,23 @@ void main() {
     );
   });
 
-  test('status asset resolver prefers configuring and printing flags', () {
+  test('hardware status classifies offline and in-use labels', () {
+    expect(CuppsHardwareStatus.isOffline('powerOff'), isTrue);
+    expect(CuppsHardwareStatus.isOffline('Device is Offline'), isTrue);
+    expect(CuppsHardwareStatus.isOffline('ready'), isFalse);
+    expect(
+      CuppsHardwareStatus.isInUseByOthers(null, result: 'DEVICE_IN_USE'),
+      isTrue,
+    );
+    expect(
+      CuppsHardwareStatus.degradedDisplayLabel(
+        message: 'Device locked by another application',
+      ),
+      'Locked by others',
+    );
+    expect(CuppsHardwareStatus.degradedDisplayLabel(), 'In use');
+  });
+
     const device = CuppsDeviceDescriptor(
       index: '4',
       name: 'OMIDLAB2BP1',

@@ -41,6 +41,7 @@ class CuppsClient implements CuppsDeviceCommandSender {
   final _deviceSessions = <String, _CuppsSocketSession>{};
   final _aeaWaits = <String, Map<CuppsAeaWaitKind, Completer<CuppsCommandResult>>>{};
   final _sessionFaultRestartTimers = <String, Timer>{};
+  final _sessionFaultRestartCounts = <String, int>{};
   final _restartingDevices = <String>{};
   /// Devices that should stay locked until unlock / release / disconnect.
   final _persistentLockDeviceIds = <String>{};
@@ -816,6 +817,28 @@ class CuppsClient implements CuppsDeviceCommandSender {
     );
   }
 
+  /// Unlock every device we hold without releasing or disconnecting.
+  /// Used when the app minimizes so other apps can use the hardware.
+  Future<void> unlockAllDevices() async {
+    _persistentLockDeviceIds.clear();
+    for (final device in _devices.values) {
+      final current = _deviceStatuses[device.id];
+      if (current?.locked != true) continue;
+      try {
+        await device.unlock();
+      } catch (error, stackTrace) {
+        logger(
+          CuppsLogLevel.warning,
+          CuppsLogScope.device,
+          'Failed to unlock ${device.descriptor.name} during unlock-all.',
+          deviceId: device.id,
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+  }
+
   Future<void> disconnect() async {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
@@ -827,6 +850,7 @@ class CuppsClient implements CuppsDeviceCommandSender {
       timer.cancel();
     }
     _sessionFaultRestartTimers.clear();
+    _sessionFaultRestartCounts.clear();
     _restartingDevices.clear();
 
     _setPlatformStatus(
@@ -1204,7 +1228,23 @@ class CuppsClient implements CuppsDeviceCommandSender {
     if (label == null) return;
 
     final current = _deviceStatuses[device.id];
-    final ready = label.toLowerCase() == 'ready';
+    final ready = label.toLowerCase() == 'ready' || CuppsHardwareStatus.isReady(label);
+
+    if (CuppsHardwareStatus.isOffline(label)) {
+      updateDeviceStatus(
+        device,
+        CuppsDeviceState.disconnected,
+        'Status: $label',
+        acquired: false,
+        initialized: false,
+        locked: false,
+        hardwareStatusLabel: label,
+        error: label,
+        clearError: false,
+      );
+      _cancelSessionFaultRestart(device.id);
+      return;
+    }
 
     if (current?.configuring == true || current?.printing == true) {
       updateDeviceStatus(
@@ -1222,7 +1262,7 @@ class CuppsClient implements CuppsDeviceCommandSender {
       device,
       ready ? CuppsDeviceState.initialized : CuppsDeviceState.degraded,
       'Status: $label',
-      initialized: true,
+      initialized: ready,
       hardwareStatusLabel: label,
       clearError: ready,
       error: ready ? null : label,
@@ -1237,19 +1277,25 @@ class CuppsClient implements CuppsDeviceCommandSender {
         CuppsXml.sessionFaultDescription(message) ?? 'session fault';
     final session = _deviceSessions[device.id];
     final failure = CuppsRequestFailure('CUPPS session fault: $description');
+    final previousHw = _deviceStatuses[device.id]?.hardwareStatusLabel;
 
     session?.abortPending(failure);
     await closeDeviceSession(device.id, notifyClosed: false);
 
+    final offline = CuppsHardwareStatus.isOffline(previousHw);
     updateDeviceStatus(
       device,
-      CuppsDeviceState.degraded,
-      'CUPPS session fault: $description',
+      offline ? CuppsDeviceState.disconnected : CuppsDeviceState.degraded,
+      offline
+          ? 'Device offline (power off) — not restarting.'
+          : 'CUPPS session fault: $description',
       locked: false,
       acquired: false,
       initialized: false,
-      error: description,
-      clearHardwareStatus: true,
+      hardwareStatusLabel: previousHw,
+      error: offline ? previousHw : description,
+      clearError: false,
+      clearHardwareStatus: previousHw == null,
     );
 
     logger(
@@ -1260,9 +1306,16 @@ class CuppsClient implements CuppsDeviceCommandSender {
       deviceId: device.id,
       messageId: message.messageId,
       xml: message.rawXml,
-      data: CuppsXml.messageLogData(message),
+      data: {
+        ...CuppsXml.messageLogData(message),
+        if (previousHw != null) 'hardware': previousHw,
+      },
     );
 
+    if (offline) {
+      _cancelSessionFaultRestart(device.id);
+      return;
+    }
     _scheduleSessionFaultRestart(device.id);
   }
 
@@ -1275,10 +1328,43 @@ class CuppsClient implements CuppsDeviceCommandSender {
     if (_deviceToken == null || _application == null) return;
     if (_restartingDevices.contains(deviceId)) return;
 
+    final current = _deviceStatuses[deviceId];
+    if (CuppsHardwareStatus.isOffline(current?.hardwareStatusLabel)) {
+      logger(
+        CuppsLogLevel.info,
+        CuppsLogScope.device,
+        'Skipping auto-restart for offline/power-off device $deviceId.',
+        deviceId: deviceId,
+        data: {'hardware': current?.hardwareStatusLabel},
+      );
+      return;
+    }
+
+    final attempts = _sessionFaultRestartCounts[deviceId] ?? 0;
+    if (attempts >= _options.maxSessionFaultRestarts) {
+      logger(
+        CuppsLogLevel.warning,
+        CuppsLogScope.device,
+        'Auto-restart limit reached for $deviceId '
+        '(${_options.maxSessionFaultRestarts}); leaving device disconnected.',
+        deviceId: deviceId,
+      );
+      updateDeviceStatus(
+        current?.device ?? _devices[deviceId]!.descriptor,
+        CuppsDeviceState.disconnected,
+        'Auto-restart stopped after repeated session faults.',
+        acquired: false,
+        initialized: false,
+        locked: false,
+        error: current?.lastError,
+      );
+      return;
+    }
+
     _cancelSessionFaultRestart(deviceId);
     _sessionFaultRestartTimers[deviceId] = Timer(
       _options.sessionFaultRestartDelay,
-      () {
+      () async {
         _sessionFaultRestartTimers.remove(deviceId);
         final device = _devices[deviceId];
         if (device == null) return;
@@ -1286,11 +1372,29 @@ class CuppsClient implements CuppsDeviceCommandSender {
             _platformStatus.state != CuppsPlatformState.discoveringDevices) {
           return;
         }
-        restartDevice(
+        final before = _deviceStatuses[deviceId];
+        if (CuppsHardwareStatus.isOffline(before?.hardwareStatusLabel)) {
+          return;
+        }
+        _sessionFaultRestartCounts[deviceId] = attempts + 1;
+        final result = await restartDevice(
           deviceId,
           deviceToken: _deviceToken!,
           airlineId: _application!.airlineCode,
-        ).ignore();
+        );
+        if (result.ok) {
+          _sessionFaultRestartCounts.remove(deviceId);
+        } else if (CuppsHardwareStatus.isOffline(
+              _deviceStatuses[deviceId]?.hardwareStatusLabel) ||
+            result.result == 'powerOff') {
+          _cancelSessionFaultRestart(deviceId);
+          logger(
+            CuppsLogLevel.info,
+            CuppsLogScope.device,
+            'Device $deviceId still offline after restart — not retrying.',
+            deviceId: deviceId,
+          );
+        }
       },
     );
   }
@@ -1350,9 +1454,13 @@ class CuppsClient implements CuppsDeviceCommandSender {
 
     if (matchedKind == null && waits.containsKey(CuppsAeaWaitKind.print)) {
       // IATA AEA uses PROK; HDC/BOCA-style printers often reply HDCPTOK… / PTOK.
-      final printOk = (upper.contains('PROK') || upper.contains('PTOK')) &&
-          !upper.contains('PRERR') &&
-          !upper.contains('PTERR');
+      // HDCERR… / PRERR / PTERR are hard failures — never treat as OK.
+      final hasHardError = upper.contains('PRERR') ||
+          upper.contains('PTERR') ||
+          upper.contains('HDCERR') ||
+          (upper.contains('ERR') && !upper.contains('PTOK') && !upper.contains('PROK'));
+      final printOk = !hasHardError &&
+          (upper.contains('PROK') || upper.contains('PTOK'));
       if (printOk) {
         matchedKind = CuppsAeaWaitKind.print;
         outcome = CuppsCommandResult(
@@ -1362,9 +1470,7 @@ class CuppsClient implements CuppsDeviceCommandSender {
           message: 'Print OK',
           aeaText: text,
         );
-      } else if (upper.contains('ERR') ||
-          upper.contains('PRERR') ||
-          upper.contains('PTERR')) {
+      } else if (hasHardError) {
         matchedKind = CuppsAeaWaitKind.print;
         outcome = CuppsCommandResult(
           ok: false,

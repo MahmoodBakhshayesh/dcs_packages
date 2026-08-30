@@ -173,16 +173,37 @@ class CuppsDevice {
     final hardwareStatus =
         CuppsXml.deviceHardwareStatusLabel(result.rawXml, type);
     if (hardwareStatus != null) {
+      if (CuppsHardwareStatus.isOffline(hardwareStatus)) {
+        _sender.updateDeviceStatus(
+          descriptor,
+          CuppsDeviceState.disconnected,
+          'Status: $hardwareStatus',
+          acquired: false,
+          initialized: false,
+          locked: false,
+          hardwareStatusLabel: hardwareStatus,
+          error: hardwareStatus,
+          clearError: false,
+        );
+        return CuppsCommandResult(
+          ok: false,
+          result: 'powerOff',
+          rawXml: result.rawXml,
+          message: 'Device is offline (power off).',
+        );
+      }
+      final ready = CuppsHardwareStatus.isReady(hardwareStatus);
       _sender.updateDeviceStatus(
         descriptor,
-        CuppsDeviceState.initialized,
+        ready ? CuppsDeviceState.initialized : CuppsDeviceState.degraded,
         'Status: $hardwareStatus',
-        initialized: true,
+        initialized: ready,
         hardwareStatusLabel: hardwareStatus,
-        clearError: true,
+        clearError: ready,
+        error: ready ? null : hardwareStatus,
       );
       return CuppsCommandResult(
-        ok: true,
+        ok: ready,
         result: result.result,
         rawXml: result.rawXml,
         message: hardwareStatus,
@@ -272,12 +293,66 @@ class CuppsDevice {
       busyMessage: 'Acquiring device.',
     );
     if (result.ok) {
+      final hardware = CuppsXml.deviceHardwareStatusLabel(result.rawXml, type) ??
+          CuppsXml.hardwareStatusLabelFromNotify(result.rawXml);
+      if (CuppsHardwareStatus.isOffline(hardware)) {
+        _sender.updateDeviceStatus(
+          descriptor,
+          CuppsDeviceState.disconnected,
+          'Device is offline (power off).',
+          acquired: false,
+          initialized: false,
+          locked: false,
+          hardwareStatusLabel: hardware,
+          error: hardware,
+          clearError: false,
+        );
+        return CuppsCommandResult(
+          ok: false,
+          result: 'powerOff',
+          rawXml: result.rawXml,
+          message: 'Device is offline (power off).',
+        );
+      }
+      if (CuppsHardwareStatus.isInUseByOthers(hardware, result: result.result)) {
+        _sender.updateDeviceStatus(
+          descriptor,
+          CuppsDeviceState.degraded,
+          'Device locked by others.',
+          acquired: false,
+          initialized: false,
+          locked: false,
+          hardwareStatusLabel: hardware,
+          error: 'Locked by others',
+          clearError: false,
+        );
+        return CuppsCommandResult(
+          ok: false,
+          result: result.result,
+          rawXml: result.rawXml,
+          message: 'Device locked by others.',
+        );
+      }
       _sender.updateDeviceStatus(
         descriptor,
         CuppsDeviceState.acquired,
         'Device acquired.',
         acquired: true,
+        hardwareStatusLabel: hardware,
         clearError: true,
+      );
+    } else if (CuppsHardwareStatus.isInUseByOthers(
+      null,
+      result: result.result,
+      error: result.message,
+    )) {
+      _sender.updateDeviceStatus(
+        descriptor,
+        CuppsDeviceState.degraded,
+        'Device locked by others.',
+        acquired: false,
+        error: 'Locked by others',
+        clearError: false,
       );
     }
     return result;
@@ -683,9 +758,10 @@ class CuppsDevice {
 
         if (ack.ok) return ack;
 
-        // Platform often accepts the print (outbound aeaResponse OK) before the
-        // device unsolicited AEA arrives — or some printers never send PROK/PTOK.
-        if (tolerateMissingDeviceAck) {
+        // Only treat *missing* device ack as soft success. Real AEA errors
+        // (e.g. HDCERR2EP) must surface as print failures on PrintBus.
+        final isTimeout = ack.result.toLowerCase() == 'timeout';
+        if (tolerateMissingDeviceAck && isTimeout) {
           return CuppsCommandResult(
             ok: true,
             result: outbound.result,

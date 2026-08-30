@@ -78,16 +78,12 @@ class CuppsStatusAssets {
         return CuppsDeviceVisualStatus.disconnect;
       }
     }
-    // Persistent lock is normal for BC/BG readers — treat as ready/active.
+    // Lock held by this app means the device is ours and operational — ready.
+    if ((status.locked || status.state == CuppsDeviceState.locked) &&
+        status.acquired) {
+      return CuppsDeviceVisualStatus.active;
+    }
     if (status.locked || status.state == CuppsDeviceState.locked) {
-      final type = status.device.type;
-      if (type == CuppsDeviceType.barcodeReader ||
-          type == CuppsDeviceType.boardingGateReader ||
-          type == CuppsDeviceType.opticalCardReader ||
-          type == CuppsDeviceType.passportReader ||
-          type == CuppsDeviceType.biometricReader) {
-        return CuppsDeviceVisualStatus.active;
-      }
       return CuppsDeviceVisualStatus.locked;
     }
     return switch (status.state) {

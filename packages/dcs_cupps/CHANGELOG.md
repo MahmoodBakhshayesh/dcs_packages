@@ -1,3 +1,14 @@
+## 0.1.6
+
+* Treat acquire/status `powerOff` / offline as disconnected — do not mark acquired or auto-restart (stops BG init loops).
+* Cap session-fault auto-restarts (`maxSessionFaultRestarts`, default 2).
+* `CuppsHardwareStatus` helpers; UI maps `degraded` → **In use** / **Locked by others**.
+
+## 0.1.5
+
+* Print AEA ack accepts `PTOK` (HDC) as well as `PROK`; longer print ack wait; tolerate missing ack when outbound OK.
+* Reader visual status: locked + ready shows active.
+
 ## 0.1.3
 
 * **Configure / print as one status period** — while `configuring` or `printing` is set, intermediate `sendDeviceRequest` successes no longer flip the device to `initialized` (avoids busy↔initialized flicker during multi-command init).
