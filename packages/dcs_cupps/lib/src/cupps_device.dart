@@ -69,6 +69,9 @@ class CuppsDevice {
   final CuppsDeviceDescriptor descriptor;
   final CuppsDeviceCommandSender _sender;
 
+  /// Last successful [interfaceMode] value (e.g. `aea`, `standard`).
+  String? _activeInterfaceMode;
+
   String get id => descriptor.id;
 
   CuppsDeviceType get type => descriptor.type;
@@ -231,10 +234,15 @@ class CuppsDevice {
         type == CuppsDeviceType.bagTagPrinter;
   }
 
-  /// BP/BT printers do not use deviceLock in CUPPS; readers / BG / PR do.
+  /// BP/BT printers do not use deviceLock in CUPPS.
+  /// Readers / document printers do.
+  /// BG may only lock when its interface mode is **standard** — AEA-mode BG
+  /// rejects deviceLock as an illogical/illegal message.
   bool get supportsDeviceLock {
+    if (type == CuppsDeviceType.boardingGateReader) {
+      return _isStandardInterfaceMode(_activeInterfaceMode ?? _preferredInterfaceMode);
+    }
     return type == CuppsDeviceType.barcodeReader ||
-        type == CuppsDeviceType.boardingGateReader ||
         type == CuppsDeviceType.opticalCardReader ||
         type == CuppsDeviceType.passportReader ||
         type == CuppsDeviceType.documentPrinter;
@@ -374,6 +382,7 @@ class CuppsDevice {
       busyMessage: 'Setting interface mode $resolvedMode.',
     );
     if (result.ok) {
+      _activeInterfaceMode = resolvedMode;
       _sender.updateDeviceStatus(
         descriptor,
         CuppsDeviceState.initialized,
@@ -882,10 +891,24 @@ class CuppsDevice {
     );
   }
 
+  String get _preferredInterfaceMode => _resolveInterfaceMode(null);
+
+  static bool _isStandardInterfaceMode(String? mode) {
+    final value = (mode ?? '').trim().toLowerCase();
+    return value == 'standard' || value == 'std';
+  }
+
   String _resolveInterfaceMode(String? mode) {
     if (mode != null && mode.trim().isNotEmpty) return mode.trim();
-    if (descriptor.supportedInterfaceModes.isNotEmpty) {
-      return descriptor.supportedInterfaceModes.first;
+    final modes = descriptor.supportedInterfaceModes;
+    if (modes.isNotEmpty) {
+      // Prefer standard for BG when advertised so deviceLock is legal.
+      if (type == CuppsDeviceType.boardingGateReader) {
+        for (final candidate in modes) {
+          if (_isStandardInterfaceMode(candidate)) return candidate.trim();
+        }
+      }
+      return modes.first;
     }
     if (type == CuppsDeviceType.boardingGateReader) return 'aea';
     if (type == CuppsDeviceType.boardingPassPrinter ||
