@@ -162,7 +162,7 @@ void main() {
       (messageId) => CuppsXml.deviceQueryRequest(messageId: messageId),
     );
 
-    final request = transport.takeWrittenXml().single;
+    final request = await transport.waitForWrittenXml(count: 1).then((list) => list.single);
     final envelope = CuppsXml.parseEnvelope(request);
     expect(envelope.messageName, 'deviceQueryRequest');
 
@@ -172,6 +172,42 @@ void main() {
 
     final result = await future;
     expect(result.ok, isTrue);
+    await client.dispose();
+  });
+
+  test('outbound frames stay sequential under concurrent request and respond', () async {
+    final transport = FakeCuppsTransport();
+    final client = CuppsClient(transportFactory: () => transport);
+
+    await client.connect(
+      endpoint: const CuppsEndpoint(host: '127.0.0.1', port: 4000),
+      application: const CuppsApplicationInfo(
+        airlineCode: 'ZZ',
+        applicationName: 'DCS',
+        applicationVersion: '1.0.0',
+      ),
+    );
+
+    // Fire overlapping platform requests; IDs must be 1,2,3 with no gaps.
+    final futures = <Future<CuppsCommandResult>>[
+      for (var i = 0; i < 3; i++)
+        client.sendPlatformRequest(
+          (messageId) => CuppsXml.deviceQueryRequest(messageId: messageId),
+        ),
+    ];
+
+    final written = await transport.waitForWrittenXml(count: 3);
+    expect(written, hasLength(3));
+    final ids = written.map((xml) => CuppsXml.parseEnvelope(xml).messageId).toList();
+    expect(ids, [1, 2, 3]);
+
+    for (final xml in written) {
+      final id = CuppsXml.parseEnvelope(xml).messageId;
+      transport.addInboundXml(responseXml(id, 'deviceQueryResponse', 'ok'));
+    }
+
+    final results = await Future.wait(futures);
+    expect(results.every((r) => r.ok), isTrue);
     await client.dispose();
   });
 
@@ -287,6 +323,48 @@ void main() {
     expect(CuppsXml.aeaRequestTexts(legacy), ['EP#AIRLINEID=IR#HARDCODE=HDC']);
   });
 
+  test('bcDataTexts decodes base64Binary boarding-pass payloads', () {
+    const b64 =
+        'TTFEQVZJUy9FTU1BTVJTICAgICAgIEVUU1QwNjggQUFBRFhCSEsgNzM4NCAyNDdZMDA0QTAwMTQgMTAw';
+    const xml = '''
+<cupps messageName="readerReadResponse" messageID="11">
+  <readerReadResponse result="OK">
+    <readerData>
+      <bcData bcTypeCode="6" readStatus="OK">$b64</bcData>
+    </readerData>
+  </readerReadResponse>
+</cupps>
+''';
+    final texts = CuppsXml.bcDataTexts(xml);
+    expect(texts, hasLength(1));
+    expect(texts.single, startsWith('M1DAVIS/EMMAMRS'));
+    expect(CuppsXml.decodeBcDataPayload(b64), startsWith('M1'));
+    expect(
+      CuppsXml.decodeBcDataPayload(
+        'M1DAVIS/EMMAMRS       ETST068 AAADXBHK 7384 247Y004A0014 100',
+      ),
+      startsWith('M1DAVIS'),
+    );
+  });
+
+  test('looksLikePrinterOrStatusAea detects HDC printer acks', () {
+    expect(CuppsXml.looksLikePrinterOrStatusAea('HDCLCOK'), isTrue);
+    expect(
+      CuppsXml.looksLikePrinterOrStatusAea(
+        'HDCSQNI#OS=0#RF=2#SI=00#DO=000#PO=0',
+      ),
+      isTrue,
+    );
+    expect(CuppsXml.looksLikePrinterOrStatusAea('CHKINPROK#101#200'), isTrue);
+    expect(CuppsXml.looksLikePrinterOrStatusAea('TST068'), isFalse);
+    expect(
+      CuppsXml.looksLikePrinterOrStatusAea(
+        'M1DAVIS/EMMAMRS       ETST068 AAADXBHK 7384 247Y004A0014 100',
+      ),
+      isFalse,
+    );
+  });
+
   test('byeRequest uses byeRequest element and messageName', () {
     final xml = CuppsXml.byeRequest(messageId: 12);
     final envelope = CuppsXml.parseEnvelope(xml);
@@ -334,6 +412,7 @@ void main() {
     expect(CuppsHardwareStatus.degradedDisplayLabel(), 'In use');
   });
 
+  test('configuring and printing map to visual statuses', () {
     const device = CuppsDeviceDescriptor(
       index: '4',
       name: 'OMIDLAB2BP1',
@@ -434,6 +513,8 @@ class FakeCuppsTransport implements CuppsTransport {
     if (!_open) {
       throw const CuppsRequestFailure('Fake transport is closed.');
     }
+    // Yield so concurrent callers interleave without the outbound lock.
+    await Future<void>.delayed(Duration.zero);
     _written.add(List<int>.of(bytes));
   }
 
@@ -454,5 +535,30 @@ class FakeCuppsTransport implements CuppsTransport {
       decoder.add(chunk);
     }
     return decoder.takeFrames();
+  }
+
+  Future<List<String>> waitForWrittenXml({
+    required int count,
+    Duration timeout = const Duration(seconds: 2),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      final frames = <String>[];
+      final decoder = CuppsFrameDecoder();
+      for (final chunk in _written) {
+        decoder.add(chunk);
+      }
+      frames.addAll(decoder.takeFrames());
+      if (frames.length >= count) {
+        _written.clear();
+        return frames;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+    final available = takeWrittenXml();
+    throw TimeoutException(
+      'Timed out waiting for $count CUPPS frames (got ${available.length}).',
+      timeout,
+    );
   }
 }

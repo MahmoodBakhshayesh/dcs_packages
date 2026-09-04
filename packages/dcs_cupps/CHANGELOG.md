@@ -1,3 +1,9 @@
+## 0.1.7
+
+* Serialize outbound CUPPS frames per device socket; advance `messageID` only after a successful write (fixes platform `messageIDSequenceError` jumps like 20→22).
+* Do not lock offline / `powerOff` devices (avoids BG `illogicalMessage` / MessageName spam after status).
+* Ignore unmatched printer AEA as barcode scans; decode base64 `bcData` to plain BCBP.
+
 ## 0.1.6
 
 * Treat acquire/status `powerOff` / offline as disconnected — do not mark acquired or auto-restart (stops BG init loops).

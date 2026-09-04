@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:xml/xml.dart';
 
 import 'cupps_models.dart';
@@ -206,14 +208,81 @@ class CuppsXml {
   }
 
   /// Barcode payloads from `bcData` elements (notify / readerReadResponse).
+  ///
+  /// CUPPS schema types `bcData` as `xs:base64Binary`; platforms often send
+  /// base64 of the IATA BCBP. Decode when needed so consumers see `M1…`.
   static List<String> bcDataTexts(String xml) {
     final document = XmlDocument.parse(xml);
     final out = <String>[];
     for (final element in document.findAllElements('bcData')) {
       final text = element.innerText.trim();
-      if (text.isNotEmpty) out.add(text);
+      if (text.isEmpty) continue;
+      out.add(decodeBcDataPayload(text));
     }
     return out;
+  }
+
+  /// Decodes CUPPS `bcData` text: plain BCBP/MRZ as-is, else base64 → UTF-8.
+  static String decodeBcDataPayload(String raw) {
+    final text = raw.trim();
+    if (text.isEmpty) return text;
+    if (_looksLikePlainScanPayload(text)) return text;
+
+    try {
+      final normalized = text.replaceAll(RegExp(r'\s+'), '');
+      final decoded = utf8.decode(base64.decode(normalized)).trim();
+      if (decoded.isNotEmpty && _looksLikePlainScanPayload(decoded)) {
+        return decoded;
+      }
+      if (decoded.isNotEmpty && !_looksLikeBase64Alphabet(decoded)) {
+        return decoded;
+      }
+    } catch (_) {
+      // Not valid base64 — use original.
+    }
+    return text;
+  }
+
+  static bool _looksLikePlainScanPayload(String text) {
+    final t = text.trim();
+    if (t.isEmpty) return false;
+    final upper = t.toUpperCase();
+    // IATA BCBP
+    if (upper.startsWith('M1') || upper.startsWith('M2') || upper.startsWith('M3')) {
+      return true;
+    }
+    // Passport / TD MRZ
+    if (upper.contains('P<') || upper.contains('I<') || upper.contains('V<')) {
+      return true;
+    }
+    if (t.contains('\n') && t.length >= 44) return true;
+    return false;
+  }
+
+  static bool _looksLikeBase64Alphabet(String text) {
+    return RegExp(r'^[A-Za-z0-9+/=\s]+$').hasMatch(text) && text.length >= 16;
+  }
+
+  /// HDC/BOCA printer status and configure AEA (must not be treated as barcodes).
+  static bool looksLikePrinterOrStatusAea(String text) {
+    final u = text.trim().toUpperCase();
+    if (u.isEmpty) return false;
+    // HDCLCOK, HDCPTOK, HDCSQNI#…, HDCERR…
+    if (u.startsWith('HDC')) return true;
+    if (u.startsWith('EP#') || u.startsWith('ST#') || u.startsWith('CHKIN')) {
+      return true;
+    }
+    if (u.contains('PTOK') ||
+        u.contains('PROK') ||
+        u.contains('PRERR') ||
+        u.contains('PTERR')) {
+      return true;
+    }
+    // Status key=value blobs: OS=0#RF=2#…
+    if (u.contains('#') && (u.contains('=') || u.split('#').length > 2)) {
+      return true;
+    }
+    return false;
   }
 
   static String? notifyEventNameFromXml(String xml) {

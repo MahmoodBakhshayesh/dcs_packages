@@ -240,6 +240,17 @@ class CuppsClient implements CuppsDeviceCommandSender {
         if (!device.supportsDeviceLock) return;
         final current = _deviceStatuses[device.id];
         if (current?.acquired != true) return;
+        // Offline / power-off devices reject lock as illogicalMessage (MessageName).
+        if (CuppsHardwareStatus.isOffline(current?.hardwareStatusLabel)) {
+          logger(
+            CuppsLogLevel.info,
+            CuppsLogScope.device,
+            'Skipping lock for offline ${device.descriptor.name}.',
+            deviceId: device.id,
+            data: {'hardware': current?.hardwareStatusLabel},
+          );
+          return;
+        }
         try {
           await device.lock();
         } catch (error, stackTrace) {
@@ -697,6 +708,10 @@ class CuppsClient implements CuppsDeviceCommandSender {
     if (!_persistentLockDeviceIds.contains(id)) return;
     if (!device.supportsDeviceLock) return;
     if (_relockInFlight.contains(id)) return;
+    final current = _deviceStatuses[id];
+    if (CuppsHardwareStatus.isOffline(current?.hardwareStatusLabel)) {
+      return;
+    }
     _relockInFlight.add(id);
     try {
       await device.lock(renew: false);
@@ -725,6 +740,30 @@ class CuppsClient implements CuppsDeviceCommandSender {
         text: trimmed,
       ),
     );
+  }
+
+  /// Unmatched AEA → scan only for readers; never for BP/BT/BG printers or HDC status.
+  static bool _shouldEmitUnmatchedAeaAsScan(
+    CuppsDeviceDescriptor device,
+    String text,
+  ) {
+    switch (device.type) {
+      case CuppsDeviceType.barcodeReader:
+      case CuppsDeviceType.boardingGateReader:
+      case CuppsDeviceType.passportReader:
+      case CuppsDeviceType.opticalCardReader:
+      case CuppsDeviceType.biometricReader:
+        break;
+      case CuppsDeviceType.boardingPassPrinter:
+      case CuppsDeviceType.bagTagPrinter:
+      case CuppsDeviceType.documentPrinter:
+      case CuppsDeviceType.displayDevice:
+      case CuppsDeviceType.zlDevice:
+      case CuppsDeviceType.ziDevice:
+      case CuppsDeviceType.unknown:
+        return false;
+    }
+    return !CuppsXml.looksLikePrinterOrStatusAea(text);
   }
 
   Future<void> _pullReaderData(CuppsDevice device) async {
@@ -1420,13 +1459,24 @@ class CuppsClient implements CuppsDeviceCommandSender {
 
     final waits = _aeaWaits[device.id];
     if (waits == null || waits.isEmpty) {
-      _emitScan(device, text);
-      logger(
-        CuppsLogLevel.debug,
-        CuppsLogScope.device,
-        'Inbound AEA with no pending waiter: $text',
-        deviceId: device.id,
-      );
+      // Printers spontaneously send HDC* / PTOK status AEA — never treat as barcode.
+      // Only reader-class devices may surface unmatched AEA as a scan (e.g. BG).
+      if (_shouldEmitUnmatchedAeaAsScan(device, text)) {
+        _emitScan(device, text);
+        logger(
+          CuppsLogLevel.debug,
+          CuppsLogScope.device,
+          'Inbound AEA with no pending waiter (scan): $text',
+          deviceId: device.id,
+        );
+      } else {
+        logger(
+          CuppsLogLevel.debug,
+          CuppsLogScope.device,
+          'Ignoring unmatched AEA (not a scan): $text',
+          deviceId: device.id,
+        );
+      }
       return;
     }
 
@@ -1633,13 +1683,25 @@ class _CuppsSocketSession {
   var _messageId = 1;
   var _closed = false;
 
+  /// Serializes all outbound frames (requests + aeaResponse) on this socket.
+  /// Concurrent writes interleaved bytes / burned message IDs and triggered
+  /// platform `messageIDSequenceError` (e.g. app sent 20 then 22).
+  Future<void> _outboundTail = Future<void>.value();
+
   bool get isOpen => !_closed && transport.isOpen;
+
+  Future<T> _withOutboundLock<T>(Future<T> Function() action) {
+    final operation = _outboundTail.catchError((_) {}).then((_) => action());
+    _outboundTail = operation.then<void>((_) {}, onError: (_) {});
+    return operation;
+  }
 
   Future<void> connect(
     CuppsEndpoint endpoint, {
     required Duration timeout,
   }) async {
     _closed = false;
+    _outboundTail = Future<void>.value();
     _subscription = transport.incoming.listen(
       _onBytes,
       onError: _onError,
@@ -1664,24 +1726,43 @@ class _CuppsSocketSession {
       throw CuppsRequestFailure('$name socket is not connected.');
     }
 
-    final messageId = _nextMessageId();
-    final xml = buildXml(messageId);
-    final completer = Completer<String>();
-    _pending[messageId] = completer;
-    final requestEnvelope = CuppsXml.parseEnvelope(xml);
+    late final int messageId;
+    late final Completer<String> completer;
 
-    logger(
-      CuppsLogLevel.debug,
-      scope,
-      '$name request: ${CuppsXml.messageLogSummary(requestEnvelope)}',
-      direction: CuppsMessageDirection.outbound,
-      deviceId: deviceId,
-      messageId: messageId,
-      xml: xml,
-      data: CuppsXml.messageLogData(requestEnvelope),
-    );
+    // Allocate ID + write under one lock so concurrent respond()/request()
+    // cannot skip an ID the platform never receives.
+    await _withOutboundLock(() async {
+      if (!isOpen) {
+        throw CuppsRequestFailure('$name socket is not connected.');
+      }
 
-    await transport.write(_codec.encode(xml));
+      messageId = _messageId;
+      final xml = buildXml(messageId);
+      completer = Completer<String>();
+      _pending[messageId] = completer;
+      final requestEnvelope = CuppsXml.parseEnvelope(xml);
+
+      logger(
+        CuppsLogLevel.debug,
+        scope,
+        '$name request: ${CuppsXml.messageLogSummary(requestEnvelope)}',
+        direction: CuppsMessageDirection.outbound,
+        deviceId: deviceId,
+        messageId: messageId,
+        xml: xml,
+        data: CuppsXml.messageLogData(requestEnvelope),
+      );
+
+      try {
+        await transport.write(_codec.encode(xml));
+        // Advance only after a successful write so failed sends do not create gaps.
+        _messageId = (_messageId % (minPlatformMessageId - 1)) + 1;
+      } catch (error) {
+        _pending.remove(messageId);
+        rethrow;
+      }
+    });
+
     return completer.future.timeout(
       timeout,
       onTimeout: () {
@@ -1692,15 +1773,20 @@ class _CuppsSocketSession {
   }
 
   Future<void> respond(String xml) async {
-    logger(
-      CuppsLogLevel.debug,
-      scope,
-      '$name response sent.',
-      direction: CuppsMessageDirection.outbound,
-      deviceId: deviceId,
-      xml: xml,
-    );
-    await transport.write(_codec.encode(xml));
+    await _withOutboundLock(() async {
+      if (!isOpen) {
+        throw CuppsRequestFailure('$name socket is not connected.');
+      }
+      logger(
+        CuppsLogLevel.debug,
+        scope,
+        '$name response sent.',
+        direction: CuppsMessageDirection.outbound,
+        deviceId: deviceId,
+        xml: xml,
+      );
+      await transport.write(_codec.encode(xml));
+    });
   }
 
   Future<void> close({bool notify = true}) async {
@@ -1713,12 +1799,6 @@ class _CuppsSocketSession {
     if (notify) {
       onClosed();
     }
-  }
-
-  int _nextMessageId() {
-    final id = _messageId;
-    _messageId = (_messageId % (minPlatformMessageId - 1)) + 1;
-    return id;
   }
 
   void _onBytes(List<int> bytes) {
