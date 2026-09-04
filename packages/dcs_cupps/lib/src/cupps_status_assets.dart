@@ -53,32 +53,22 @@ class CuppsStatusAssets {
   static CuppsDeviceVisualStatus visualStatusForDeviceStatus(
     CuppsDeviceStatus status,
   ) {
-    if (status.lastError != null || status.state == CuppsDeviceState.failed) {
-      return CuppsDeviceVisualStatus.failed;
-    }
     if (status.printing) {
       return CuppsDeviceVisualStatus.printing;
     }
     if (status.configuring) {
       return CuppsDeviceVisualStatus.configuring;
     }
-    final hardware = status.hardwareStatusLabel?.trim().toLowerCase();
-    if (hardware != null && hardware.isNotEmpty) {
-      if (hardware.contains('paper') && hardware.contains('out')) {
-        return CuppsDeviceVisualStatus.paperOut;
-      }
-      if (hardware.contains('jam')) return CuppsDeviceVisualStatus.jammed;
-      if (hardware.contains('open')) return CuppsDeviceVisualStatus.open;
-      if (hardware.contains('print')) return CuppsDeviceVisualStatus.printing;
-      // Platform `ready="true"` / "Device is Ready" — prefer over lock badge.
-      if (hardware.contains('ready') || hardware.contains('active')) {
-        return CuppsDeviceVisualStatus.active;
-      }
-      if (hardware.contains('offline') || hardware.contains('power')) {
-        return CuppsDeviceVisualStatus.disconnect;
-      }
-    }
-    // Lock held by this app means the device is ours and operational — ready.
+
+    final hardware = status.hardwareStatusLabel?.trim().toLowerCase() ?? '';
+    final errorText = '${status.lastError ?? ''}'.trim().toLowerCase();
+    final blob = '$hardware $errorText'.trim();
+
+    // Hardware conditions first — paper/lid/jam must win over generic lastError.
+    final condition = _visualFromHardwareBlob(blob);
+    if (condition != null) return condition;
+
+    // Lock held by this app is healthy (esp. BC). Do not treat as disconnect/off.
     if ((status.locked || status.state == CuppsDeviceState.locked) &&
         status.acquired) {
       return CuppsDeviceVisualStatus.active;
@@ -86,6 +76,20 @@ class CuppsStatusAssets {
     if (status.locked || status.state == CuppsDeviceState.locked) {
       return CuppsDeviceVisualStatus.locked;
     }
+
+    if (status.state == CuppsDeviceState.failed) {
+      return CuppsDeviceVisualStatus.failed;
+    }
+    // Soft lastError (e.g. OK-deviceAlreadyLocked) should not paint red ERR when
+    // the device is otherwise operational.
+    if (status.lastError != null &&
+        status.state != CuppsDeviceState.initialized &&
+        status.state != CuppsDeviceState.locked &&
+        status.state != CuppsDeviceState.dataAvailable &&
+        status.state != CuppsDeviceState.busy) {
+      return CuppsDeviceVisualStatus.failed;
+    }
+
     return switch (status.state) {
       CuppsDeviceState.unknown ||
       CuppsDeviceState.discovered => CuppsDeviceVisualStatus.natural,
@@ -103,5 +107,35 @@ class CuppsStatusAssets {
       CuppsDeviceState.disconnected => CuppsDeviceVisualStatus.disconnect,
       CuppsDeviceState.failed => CuppsDeviceVisualStatus.failed,
     };
+  }
+
+  static CuppsDeviceVisualStatus? _visualFromHardwareBlob(String blob) {
+    if (blob.isEmpty) return null;
+    if (blob.contains('paperjam') ||
+        blob.contains('paper jam') ||
+        (blob.contains('jam') && !blob.contains('already'))) {
+      return CuppsDeviceVisualStatus.jammed;
+    }
+    if (blob.contains('paperout') ||
+        blob.contains('paper out') ||
+        blob.contains('paper_out') ||
+        (blob.contains('paper') && blob.contains('out'))) {
+      return CuppsDeviceVisualStatus.paperOut;
+    }
+    if (blob.contains('lid') ||
+        blob.contains('cover') ||
+        blob.contains('head lifted') ||
+        blob.contains('platen') ||
+        blob.contains('door open') ||
+        (blob.contains('open') && !blob.contains('offline'))) {
+      return CuppsDeviceVisualStatus.open;
+    }
+    if (CuppsHardwareStatus.isOffline(blob)) {
+      return CuppsDeviceVisualStatus.disconnect;
+    }
+    if (blob.contains('ready') || blob == 'active' || blob.contains('device is ready')) {
+      return CuppsDeviceVisualStatus.active;
+    }
+    return null;
   }
 }

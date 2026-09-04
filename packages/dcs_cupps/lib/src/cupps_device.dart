@@ -413,7 +413,7 @@ class CuppsDevice {
       busyState: CuppsDeviceState.locking,
       busyMessage: renew ? 'Renewing device lock.' : 'Locking device.',
     );
-    if (result.ok) {
+        if (result.ok) {
       _sender.setPersistentLockDesired(id, true);
       _sender.updateDeviceStatus(
         descriptor,
@@ -421,6 +421,7 @@ class CuppsDevice {
         renew ? 'Device lock renewed.' : 'Device locked.',
         locked: true,
         clearError: true,
+        clearHardwareStatus: true,
       );
     }
     return result;

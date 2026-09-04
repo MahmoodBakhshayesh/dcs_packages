@@ -420,17 +420,50 @@ class CuppsXml {
   }
 
   static String? _hardwareLabelFromStatusElement(XmlElement element) {
-    final status = _attr(element, 'status') ?? _attr(element, 'state');
-    if (status != null && status.trim().isNotEmpty) return status.trim();
-
     final desc = _attr(element, 'desc')?.trim();
+    final status = (_attr(element, 'status') ?? _attr(element, 'state'))?.trim();
+
+    // Fault flags / descriptive lid-open win over generic ready/status.
     if (_isTruthy(_attr(element, 'paperJam'))) return 'paperJam';
     if (_isTruthy(_attr(element, 'paperOut'))) return 'paperOut';
     if (_isTruthy(_attr(element, 'powerOff'))) return 'powerOff';
+    if (_isTruthy(_attr(element, 'lidOpen')) ||
+        _isTruthy(_attr(element, 'coverOpen'))) {
+      return 'lidOpen';
+    }
+
+    final descLower = (desc ?? '').toLowerCase();
+    if (descLower.contains('paper out') || descLower == 'paperout') {
+      return 'paperOut';
+    }
+    if (descLower.contains('paper jam') || descLower.contains('jam')) {
+      return 'paperJam';
+    }
+    if (descLower.contains('lid') ||
+        descLower.contains('cover') ||
+        descLower.contains('head lifted') ||
+        descLower.contains('platen')) {
+      return 'lidOpen';
+    }
+    if (descLower.contains('offline') || descLower.contains('power off')) {
+      return desc ?? 'offline';
+    }
+
+    final statusLower = (status ?? '').toLowerCase();
+    if (statusLower == 'paperout' || statusLower == 'paper_out') return 'paperOut';
+    if (statusLower == 'paperjam' || statusLower == 'paper_jam') return 'paperJam';
+    if (statusLower.contains('offline') || statusLower == 'poweroff') {
+      return status;
+    }
+
     if (_isTruthy(_attr(element, 'init'))) return desc ?? 'initializing';
+    if (status != null && status.isNotEmpty && statusLower != 'ready') {
+      return status;
+    }
     if (_isTruthy(_attr(element, 'ready'))) return 'ready';
     if (_isTruthy(_attr(element, 'unknown'))) return 'unknown';
     if (desc != null && desc.isNotEmpty) return desc;
+    if (status != null && status.isNotEmpty) return status;
     return null;
   }
 

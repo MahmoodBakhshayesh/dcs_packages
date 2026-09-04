@@ -1229,6 +1229,7 @@ class CuppsClient implements CuppsDeviceCommandSender {
 
     final current = _deviceStatuses[device.id];
     final ready = label.toLowerCase() == 'ready' || CuppsHardwareStatus.isReady(label);
+    final holdLock = current?.locked == true;
 
     if (CuppsHardwareStatus.isOffline(label)) {
       updateDeviceStatus(
@@ -1252,20 +1253,22 @@ class CuppsClient implements CuppsDeviceCommandSender {
         current!.state,
         'Status: $label',
         hardwareStatusLabel: label,
-        clearError: ready,
-        error: ready ? null : label,
+        locked: holdLock ? true : null,
+        clearError: true,
       );
       return;
     }
 
+    // Paper out / lid open / jam are hardware conditions — keep label for icons
+    // but do not stash them as lastError (that painted a generic red ERR).
     updateDeviceStatus(
       device,
       ready ? CuppsDeviceState.initialized : CuppsDeviceState.degraded,
       'Status: $label',
-      initialized: ready,
+      initialized: ready || holdLock,
+      locked: holdLock ? true : null,
       hardwareStatusLabel: label,
-      clearError: ready,
-      error: ready ? null : label,
+      clearError: true,
     );
   }
 
@@ -1549,11 +1552,18 @@ class CuppsClient implements CuppsDeviceCommandSender {
   CuppsCommandResult _resultFromXml(String xml) {
     final result = CuppsXml.result(xml);
     return CuppsCommandResult(
-      ok: result.isEmpty || result.toLowerCase() == 'ok',
+      ok: _isOkCuppsResult(result),
       result: result,
       rawXml: xml,
       message: result.isEmpty ? null : result,
     );
+  }
+
+  /// CUPPS success codes include bare `OK` and qualified `OK-deviceAlreadyLocked`.
+  static bool _isOkCuppsResult(String result) {
+    final normalized = result.trim().toLowerCase();
+    if (normalized.isEmpty || normalized == 'ok') return true;
+    return normalized.startsWith('ok-') || normalized.startsWith('ok_');
   }
 
   void _setPlatformStatus(
