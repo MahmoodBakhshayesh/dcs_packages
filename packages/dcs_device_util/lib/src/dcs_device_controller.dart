@@ -10,19 +10,23 @@ import 'dcs_request_queue.dart';
 /// Coordinates discovery, matching, connection, reconnect, health checks, and UI status.
 class DcsDeviceController {
   DcsDeviceController({
-    DcsDeviceConfig initialConfig = const DcsDeviceConfig(),
-    List<DcsDeviceAdapter> adapters = const [DcsSerialPortAdapter()],
+    DcsDeviceConfig? initialConfig,
+    List<DcsDeviceAdapter>? adapters,
     DcsConfigStore? configStore,
     DcsRetryPolicy retryPolicy = const DcsRetryPolicy(),
     DcsConnectionHealthPolicy healthPolicy = const DcsConnectionHealthPolicy(),
     DcsLogger? logger,
-  }) : _config = initialConfig,
-       _adapters = adapters,
+  }) : _config = (initialConfig ?? DcsDeviceConfig.cuppsDefaults()).withCuppsCatalogEnsured(),
+       _adapters = adapters ??
+           const [
+             DcsSerialPortAdapter(),
+             DcsNetworkPortAdapter(),
+           ],
        _configStore = configStore,
        _retryPolicy = retryPolicy,
        _healthPolicy = healthPolicy,
        _logger = logger {
-    _seedStatuses(initialConfig.profiles);
+    _seedStatuses(_config.profiles);
   }
 
   DcsDeviceConfig _config;
@@ -43,6 +47,10 @@ class DcsDeviceController {
   final _missedHeartbeats = <String, int>{};
   final _lastDiscovery = <String, DcsDiscoveredDevice>{};
   final _connecting = <String>{};
+  /// Profiles that must not be auto-connected by the monitor until [connect] is called.
+  final _autoConnectBlocked = <String>{};
+  /// Bumped by [disconnect] so in-flight [connect] retry loops abort.
+  final _connectEpoch = <String, int>{};
 
   Timer? _monitorTimer;
   bool _closed = false;
@@ -62,10 +70,14 @@ class DcsDeviceController {
 
     final savedConfig = await _configStore?.load();
     if (savedConfig != null) {
-      _config = savedConfig;
-      _seedStatuses(savedConfig.profiles);
+      _config = savedConfig.withCuppsCatalogEnsured();
+      _seedStatuses(_config.profiles);
       _emitStatuses();
       _log(DcsLogLevel.info, 'Loaded saved DCS device configuration.');
+    } else {
+      _config = _config.withCuppsCatalogEnsured();
+      _seedStatuses(_config.profiles);
+      await _configStore?.save(_config);
     }
 
     await discover();
@@ -81,9 +93,9 @@ class DcsDeviceController {
 
   Future<void> saveConfig(DcsDeviceConfig config) async {
     _ensureOpen();
-    _config = config;
-    _seedStatuses(config.profiles);
-    await _configStore?.save(config);
+    _config = config.withCuppsCatalogEnsured();
+    _seedStatuses(_config.profiles);
+    await _configStore?.save(_config);
     _emitStatuses();
     _log(DcsLogLevel.info, 'Saved DCS device configuration.');
   }
@@ -203,21 +215,35 @@ class DcsDeviceController {
     final profile = _profileById(profileId);
     if (profile == null || !profile.enabled) return;
 
+    _autoConnectBlocked.remove(profileId);
+    final epoch = _connectEpoch[profileId] ?? 0;
     _connecting.add(profileId);
     try {
-      await _connectWithRetry(profile);
+      await _connectWithRetry(profile, epoch: epoch);
     } finally {
       _connecting.remove(profileId);
     }
   }
 
   Future<void> reconnect(String profileId) async {
-    await disconnect(profileId);
+    await disconnect(profileId, allowAutoReconnect: true);
     await discover();
     await connect(profileId);
   }
 
-  Future<void> disconnect(String profileId) async {
+  /// Disconnects [profileId] and cancels any in-flight connect/retry for it.
+  ///
+  /// By default blocks monitor auto-connect until the next explicit [connect].
+  /// Pass [allowAutoReconnect] for transient drops (heartbeat) that should retry.
+  Future<void> disconnect(
+    String profileId, {
+    bool allowAutoReconnect = false,
+  }) async {
+    _connectEpoch[profileId] = (_connectEpoch[profileId] ?? 0) + 1;
+    if (!allowAutoReconnect) {
+      _autoConnectBlocked.add(profileId);
+    }
+
     _healthTimers.remove(profileId)?.cancel();
     _missedHeartbeats.remove(profileId);
     await _dataSubscriptions.remove(profileId)?.cancel();
@@ -226,12 +252,20 @@ class DcsDeviceController {
     final session = _sessions.remove(profileId);
     if (session != null) {
       await session.close();
-      _setStatus(
-        profileId,
-        DcsDeviceConnectionState.disconnected,
-        message: 'Disconnected.',
+    }
+
+    final wasConnecting = _connecting.contains(profileId);
+    _setStatus(
+      profileId,
+      DcsDeviceConnectionState.disconnected,
+      message: wasConnecting ? 'Connect cancelled.' : 'Disconnected.',
+    );
+    if (session != null || wasConnecting) {
+      _log(
+        DcsLogLevel.info,
+        wasConnecting ? 'Cancelled device connect.' : 'Disconnected device.',
+        profileId: profileId,
       );
-      _log(DcsLogLevel.info, 'Disconnected device.', profileId: profileId);
     }
   }
 
@@ -271,6 +305,56 @@ class DcsDeviceController {
 
   Stream<List<int>> dataFor(String profileId) {
     return _dataControllerFor(profileId).stream;
+  }
+
+  /// Decoded text lines from a reader (quiet-window flush, ASCII/UTF-8).
+  Stream<String> textListenFor(
+    String profileId, {
+    Duration quietWindow = const Duration(milliseconds: 40),
+  }) {
+    final controller = StreamController<String>.broadcast();
+    final buffer = <int>[];
+    Timer? flush;
+    late final StreamSubscription<List<int>> sub;
+
+    void emit() {
+      if (buffer.isEmpty) return;
+      final text = String.fromCharCodes(buffer).trim();
+      buffer.clear();
+      if (text.isNotEmpty && !controller.isClosed) {
+        controller.add(text);
+      }
+    }
+
+    sub = dataFor(profileId).listen(
+      (chunk) {
+        buffer.addAll(chunk);
+        flush?.cancel();
+        flush = Timer(quietWindow, emit);
+      },
+      onError: controller.addError,
+      onDone: () async {
+        flush?.cancel();
+        emit();
+        await controller.close();
+      },
+    );
+
+    controller.onCancel = () async {
+      flush?.cancel();
+      await sub.cancel();
+    };
+
+    return controller.stream;
+  }
+
+  DcsDeviceProfile? profileById(String profileId) => _profileById(profileId);
+
+  DcsDeviceProfile? profileByRole(DcsDeviceRole role) {
+    for (final profile in _config.profiles) {
+      if (profile.role == role) return profile;
+    }
+    return null;
   }
 
   void startMonitoring() {
@@ -324,18 +408,40 @@ class DcsDeviceController {
       final status = _statuses[profile.id];
       if (status == null ||
           status.isConnected ||
-          _connecting.contains(profile.id)) {
+          _connecting.contains(profile.id) ||
+          _autoConnectBlocked.contains(profile.id)) {
+        continue;
+      }
+      // Do not silently re-hammer devices that already failed an explicit connect.
+      if (status.state == DcsDeviceConnectionState.failed ||
+          status.state == DcsDeviceConnectionState.unconfigured) {
         continue;
       }
       unawaited(connect(profile.id));
     }
   }
 
-  Future<void> _connectWithRetry(DcsDeviceProfile profile) async {
+  Future<void> _connectWithRetry(
+    DcsDeviceProfile profile, {
+    required int epoch,
+  }) async {
     Object? lastError;
     StackTrace? lastStackTrace;
 
+    bool cancelled() =>
+        _closed || (_connectEpoch[profile.id] ?? 0) != epoch;
+
     for (var attempt = 1; attempt <= _retryPolicy.maxAttempts; attempt += 1) {
+      if (cancelled()) {
+        _setStatus(
+          profile.id,
+          DcsDeviceConnectionState.disconnected,
+          message: 'Connect cancelled.',
+          attempt: attempt,
+        );
+        return;
+      }
+
       if (attempt > 1) {
         final delay = _retryPolicy.delayForAttempt(attempt);
         _setStatus(
@@ -345,10 +451,28 @@ class DcsDeviceController {
           attempt: attempt,
         );
         await Future<void>.delayed(delay);
+        if (cancelled()) {
+          _setStatus(
+            profile.id,
+            DcsDeviceConnectionState.disconnected,
+            message: 'Connect cancelled.',
+            attempt: attempt,
+          );
+          return;
+        }
       }
 
       final device =
           _lastDiscovery[profile.id] ?? await _discoverProfile(profile);
+      if (cancelled()) {
+        _setStatus(
+          profile.id,
+          DcsDeviceConnectionState.disconnected,
+          message: 'Connect cancelled.',
+          attempt: attempt,
+        );
+        return;
+      }
       if (device == null) {
         lastError = DcsDeviceConnectionException(
           'No matching device for ${profile.label}.',
@@ -373,8 +497,22 @@ class DcsDeviceController {
           clearError: true,
         );
 
-        final adapter = _adapterFor(profile.transport);
+        final adapter = _adapterFor(
+          profile.connectionType == DcsConnectionType.lan
+              ? DcsDeviceTransport.network
+              : profile.transport,
+        );
         final session = await adapter.connect(profile, device);
+        if (cancelled()) {
+          await session.close();
+          _setStatus(
+            profile.id,
+            DcsDeviceConnectionState.disconnected,
+            message: 'Connect cancelled.',
+            attempt: attempt,
+          );
+          return;
+        }
         _sessions[profile.id] = session;
         _attachData(profile.id, session);
         _startHealthCheck(profile.id, session);
@@ -403,6 +541,7 @@ class DcsDeviceController {
       }
     }
 
+    _autoConnectBlocked.add(profile.id);
     _setStatus(
       profile.id,
       DcsDeviceConnectionState.failed,
@@ -430,13 +569,51 @@ class DcsDeviceController {
     DcsDeviceProfile profile,
     List<DcsDiscoveredDevice> discoveries,
   ) {
+    if (profile.connectionType == DcsConnectionType.lan) {
+      if (!profile.lan.isConfigured) return null;
+      return DcsDiscoveredDevice(
+        id: 'lan:${profile.lan.host}:${profile.lan.port}',
+        portName: profile.lan.host,
+        transport: DcsDeviceTransport.network,
+        metadata: {'port': '${profile.lan.port}'},
+      );
+    }
+
     for (final device in discoveries) {
       if (device.transport == profile.transport &&
           profile.matcher.matches(device)) {
         return device;
       }
     }
+
+    // Explicit COM port configured — synthesize a target even if discovery missed metadata.
+    final port = profile.comPort?.trim();
+    if (port != null && port.isNotEmpty) {
+      for (final device in discoveries) {
+        if (device.portName.toUpperCase() == port.toUpperCase()) return device;
+      }
+      return DcsDiscoveredDevice(
+        id: 'serial:$port',
+        portName: port,
+        transport: DcsDeviceTransport.serial,
+      );
+    }
     return null;
+  }
+
+  DcsDeviceAdapter _adapterFor(DcsDeviceTransport transport) {
+    final wanted = transport == DcsDeviceTransport.network
+        ? DcsDeviceTransport.network
+        : DcsDeviceTransport.serial;
+    for (final adapter in _adapters) {
+      if (adapter.transport == wanted) return adapter;
+    }
+    for (final adapter in _adapters) {
+      if (adapter.transport == transport) return adapter;
+    }
+    throw DcsDeviceConnectionException(
+      'No adapter registered for ${transport.name}.',
+    );
   }
 
   void _attachData(String profileId, DcsDeviceSession session) {
@@ -489,7 +666,7 @@ class DcsDeviceController {
           error: error,
           stackTrace: stackTrace,
         );
-        await disconnect(profileId);
+        await disconnect(profileId, allowAutoReconnect: true);
         if (_config.autoReconnect && !_closed) {
           unawaited(connect(profileId));
         }
@@ -518,15 +695,6 @@ class DcsDeviceController {
     return _requestQueues.putIfAbsent(
       profileId,
       () => DcsDeviceRequestQueue(session, defaultOptions: options),
-    );
-  }
-
-  DcsDeviceAdapter _adapterFor(DcsDeviceTransport transport) {
-    for (final adapter in _adapters) {
-      if (adapter.transport == transport) return adapter;
-    }
-    throw DcsDeviceConnectionException(
-      'No adapter registered for ${transport.name}.',
     );
   }
 

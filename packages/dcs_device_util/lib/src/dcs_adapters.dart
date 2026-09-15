@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_libserialport/flutter_libserialport.dart';
@@ -50,13 +51,22 @@ class DcsSerialPortAdapter implements DcsDeviceAdapter {
     DcsDeviceProfile profile,
     DcsDiscoveredDevice device,
   ) async {
+    if (profile.connectionType == DcsConnectionType.lan) {
+      throw const DcsDeviceConnectionException(
+        'Serial adapter cannot open LAN profiles. Use the network adapter.',
+      );
+    }
+
     final port = SerialPort(device.portName);
+    final options = profile.serialOptions;
     final config = SerialPortConfig()
-      ..baudRate = profile.serialOptions.baudRate
-      ..bits = profile.serialOptions.dataBits
-      ..stopBits = profile.serialOptions.stopBits
-      ..parity = profile.serialOptions.parity;
-    config.setFlowControl(_flowControlValue(profile.serialOptions.flowControl));
+      ..baudRate = options.baudRate
+      ..bits = options.dataBits
+      ..stopBits = options.stopBits
+      ..parity = options.parity
+      ..dtr = options.dtrEnable ? SerialPortDtr.on : SerialPortDtr.off
+      ..rts = options.rtsEnable ? SerialPortRts.on : SerialPortRts.off
+      ..setFlowControl(_flowControlValue(options.flowControl));
 
     port.config = config;
 
@@ -99,6 +109,48 @@ class DcsSerialPortAdapter implements DcsDeviceAdapter {
       );
     } finally {
       port.dispose();
+    }
+  }
+}
+
+/// Minimal TCP adapter for LAN Standalone profiles.
+class DcsNetworkPortAdapter implements DcsDeviceAdapter {
+  const DcsNetworkPortAdapter();
+
+  @override
+  DcsDeviceTransport get transport => DcsDeviceTransport.network;
+
+  @override
+  Future<List<DcsDiscoveredDevice>> discover() async => const [];
+
+  @override
+  Future<DcsDeviceSession> connect(
+    DcsDeviceProfile profile,
+    DcsDiscoveredDevice device,
+  ) async {
+    final host = profile.lan.host.trim().isNotEmpty
+        ? profile.lan.host.trim()
+        : device.portName;
+    final port = profile.lan.port > 0
+        ? profile.lan.port
+        : int.tryParse(device.metadata['port'] ?? '') ?? 0;
+    if (host.isEmpty || port <= 0) {
+      throw const DcsDeviceConnectionException(
+        'LAN host and port are required.',
+      );
+    }
+
+    try {
+      final socket = await Socket.connect(
+        host,
+        port,
+        timeout: profile.serialOptions.writeTimeout,
+      );
+      return _DcsNetworkSession(socket);
+    } catch (error) {
+      throw DcsDeviceConnectionException(
+        'Could not open LAN $host:$port — $error',
+      );
     }
   }
 }
@@ -159,6 +211,54 @@ class _DcsSerialPortSession implements DcsDeviceSession {
   }
 }
 
+class _DcsNetworkSession implements DcsDeviceSession {
+  _DcsNetworkSession(this._socket) {
+    _dataSubscription = _socket.listen(
+      _dataController.add,
+      onError: _dataController.addError,
+      onDone: _dataController.close,
+      cancelOnError: false,
+    );
+  }
+
+  final Socket _socket;
+  final StreamController<List<int>> _dataController =
+      StreamController.broadcast();
+  late final StreamSubscription<List<int>> _dataSubscription;
+  var _closed = false;
+
+  @override
+  Stream<List<int>> get data => _dataController.stream;
+
+  @override
+  bool get isOpen => !_closed;
+
+  @override
+  Future<void> write(List<int> bytes) async {
+    if (!isOpen) {
+      throw const DcsDeviceConnectionException('LAN socket is closed.');
+    }
+    _socket.add(bytes);
+    await _socket.flush();
+  }
+
+  @override
+  Future<void> ping() async {
+    if (!isOpen) {
+      throw const DcsDeviceConnectionException('LAN socket is not open.');
+    }
+  }
+
+  @override
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    await _dataSubscription.cancel();
+    await _socket.close();
+    await _dataController.close();
+  }
+}
+
 class DcsDeviceConnectionException implements Exception {
   const DcsDeviceConnectionException(this.message, {this.code});
 
@@ -181,7 +281,10 @@ int _flowControlValue(DcsSerialFlowControl flowControl) {
   return switch (flowControl) {
     DcsSerialFlowControl.none => SerialPortFlowControl.none,
     DcsSerialFlowControl.xonXoff => SerialPortFlowControl.xonXoff,
-    DcsSerialFlowControl.rtsCts => SerialPortFlowControl.rtsCts,
+    DcsSerialFlowControl.rtsCts ||
+    DcsSerialFlowControl.requestToSend =>
+      SerialPortFlowControl.rtsCts,
     DcsSerialFlowControl.dtrDsr => SerialPortFlowControl.dtrDsr,
+    DcsSerialFlowControl.requestToSendXonXoff => SerialPortFlowControl.xonXoff,
   };
 }
