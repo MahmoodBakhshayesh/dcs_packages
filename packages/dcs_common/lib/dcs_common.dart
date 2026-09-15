@@ -23,6 +23,9 @@ enum DcsTransportKind {
   cuppsPlatform,
   cuteMatip,
   hostApi,
+  zebraNetwork,
+  zebraBluetooth,
+  zebraUsb,
   simulator,
   unknown,
 }
@@ -49,6 +52,7 @@ enum DcsPackageModule {
   deviceUtil,
   cupps,
   cute,
+  zebra,
   documents,
   bcbp,
   mrz,

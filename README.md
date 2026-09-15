@@ -19,6 +19,7 @@ Repository: [github.com/MahmoodBakhshayesh/dcs_packages](https://github.com/Mahm
 | [dcs_cupps](packages/dcs_cupps) | CUPPS socket/XML platform client | Flutter |
 | [dcs_cute](packages/dcs_cute) | CUTE/MATIP socket client | Flutter |
 | [dcs_cute_peripherals](packages/dcs_cute_peripherals) | CUTE peripherals: ARINC TCP, SITA/RESA FFI | Flutter |
+| [dcs_zebra](packages/dcs_zebra) | Zebra Link-OS printers (TCP / BT / USB) | Flutter |
 | [dcs_device_util](packages/dcs_device_util) | Desktop serial/USB device management | Flutter |
 
 The reference DCS application lives separately at [`../dcs`](../dcs) (sibling folder) and consumes these packages via git dependencies.
@@ -81,6 +82,11 @@ dependencies:
       url: https://github.com/MahmoodBakhshayesh/dcs_packages.git
       path: packages/dcs_device_util
       ref: main
+  dcs_zebra:
+    git:
+      url: https://github.com/MahmoodBakhshayesh/dcs_packages.git
+      path: packages/dcs_zebra
+      ref: main
   dcs_bcbp:
     git:
       url: https://github.com/MahmoodBakhshayesh/dcs_packages.git
@@ -135,6 +141,29 @@ melos bootstrap
 - Run tests: `melos run test`
 
 `melos bootstrap` links local packages together (overrides git dependencies with local paths).
+
+## Pull all projects from GitHub
+
+From the monorepo:
+
+**Windows (PowerShell — recommended):**
+
+```powershell
+cd dcs-packages
+.\scripts\pull-all.ps1
+```
+
+Or run `scripts\pull-all.bat` (uses Git Bash explicitly).
+
+**macOS / Linux / Git Bash:**
+
+```bash
+cd dcs-packages
+chmod +x scripts/pull-all.sh   # once on Mac/Linux
+./scripts/pull-all.sh
+```
+
+This fast-forwards **dcs-packages** and the sibling **dcs** app repository from `origin`, then runs `melos bootstrap` / `flutter pub get` when available.
 
 ## Push all projects to GitHub
 
