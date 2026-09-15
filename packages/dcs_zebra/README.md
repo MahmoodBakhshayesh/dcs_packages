@@ -97,4 +97,4 @@ Link-OS SDK binaries under `sdks/` and bundled into `android/libs` / `ios/Framew
 
 - Android Link-OS **2.16.5518** (`android/libs`)
 - iOS Link-OS **1.6.1158** (`ios/Frameworks/ZSDK_API.xcframework`)
-- Full SDK trees kept under `sdks/Link-OS_SDK/` for reference
+- Optional local reference copies under `sdks/Link-OS_SDK/` (gitignored): only Android/iOS `lib` folders — demos, docs, print-station apps, and PC/.NET trees are not kept (re-download from Zebra if needed)
