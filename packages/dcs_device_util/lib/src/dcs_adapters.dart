@@ -56,6 +56,11 @@ class DcsSerialPortAdapter implements DcsDeviceAdapter {
         'Serial adapter cannot open LAN profiles. Use the network adapter.',
       );
     }
+    if (profile.connectionType == DcsConnectionType.lpt) {
+      throw const DcsDeviceConnectionException(
+        'Serial adapter cannot open LPT profiles. Use the LPT adapter.',
+      );
+    }
 
     final port = SerialPort(device.portName);
     final options = profile.serialOptions;
@@ -73,14 +78,25 @@ class DcsSerialPortAdapter implements DcsDeviceAdapter {
     if (!port.openReadWrite()) {
       final error = SerialPort.lastError;
       port.dispose();
+      final code = error?.errorCode;
+      final message = error?.message ?? 'unknown serial error';
+      final denied = code == 5 ||
+          message.toLowerCase().contains('access is denied') ||
+          message.toLowerCase().contains('access denied');
       throw DcsDeviceConnectionException(
-        'Could not open serial port ${device.portName}: '
-        '${error?.message ?? 'unknown serial error'}',
-        code: error?.errorCode,
+        denied
+            ? 'Could not open serial port ${device.portName}: Access denied. '
+                'Another app (or CUPPS) may be using this COM port — close it and reconnect.'
+            : 'Could not open serial port ${device.portName}: $message',
+        code: code,
       );
     }
 
-    return _DcsSerialPortSession(port);
+    return _DcsSerialPortSession(
+      port,
+      writeTimeout: options.writeTimeout,
+      rtsEnable: options.rtsEnable,
+    );
   }
 
   static DcsDiscoveredDevice _deviceFromPortName(String portName) {
@@ -156,7 +172,11 @@ class DcsNetworkPortAdapter implements DcsDeviceAdapter {
 }
 
 class _DcsSerialPortSession implements DcsDeviceSession {
-  _DcsSerialPortSession(this._port) {
+  _DcsSerialPortSession(
+    this._port, {
+    this.writeTimeout = const Duration(milliseconds: 8000),
+    this.rtsEnable = true,
+  }) {
     _reader = SerialPortReader(_port);
     _dataSubscription = _reader.stream.listen(
       _dataController.add,
@@ -166,6 +186,8 @@ class _DcsSerialPortSession implements DcsDeviceSession {
   }
 
   final SerialPort _port;
+  final Duration writeTimeout;
+  final bool rtsEnable;
   final StreamController<List<int>> _dataController =
       StreamController.broadcast();
   late final SerialPortReader _reader;
@@ -183,12 +205,51 @@ class _DcsSerialPortSession implements DcsDeviceSession {
     if (!isOpen) {
       throw const DcsDeviceConnectionException('Serial port is closed.');
     }
+    if (bytes.isEmpty) return;
 
-    final written = _port.write(Uint8List.fromList(bytes));
-    if (written != bytes.length) {
-      throw DcsDeviceConnectionException(
-        'Serial port wrote $written of ${bytes.length} bytes.',
-      );
+    // Match standalone C# SerialPortBase.Send: assert RTS before every write.
+    if (rtsEnable) {
+      try {
+        final cfg = _port.config;
+        cfg.rts = SerialPortRts.on;
+        _port.config = cfg;
+      } catch (_) {}
+    }
+
+    // Default libserialport write is non-blocking and often returns a partial
+    // count for large AEA payloads (CP#). Loop with a real timeout so the full
+    // document leaves the TX buffer (or we fail cleanly).
+    final data = Uint8List.fromList(bytes);
+    var offset = 0;
+    final deadline = DateTime.now().add(writeTimeout);
+
+    while (offset < data.length) {
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) {
+        throw DcsDeviceConnectionException(
+          'Serial write timed out after $offset of ${data.length} bytes '
+          '(${_port.name}).',
+        );
+      }
+
+      final chunk = Uint8List.sublistView(data, offset);
+      final timeoutMs = remaining.inMilliseconds.clamp(1, 60000);
+      // timeout >= 0 => blocking write up to timeoutMs.
+      final written = _port.write(chunk, timeout: timeoutMs);
+      if (written < 0) {
+        final error = SerialPort.lastError;
+        throw DcsDeviceConnectionException(
+          'Serial write failed on ${_port.name}: '
+          '${error?.message ?? 'unknown serial error'}',
+          code: error?.errorCode,
+        );
+      }
+      if (written == 0) {
+        // Yield so timers / UI can run, then retry until deadline.
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        continue;
+      }
+      offset += written;
     }
   }
 
@@ -269,6 +330,119 @@ class DcsDeviceConnectionException implements Exception {
   String toString() {
     final suffix = code == null ? '' : ' (code: $code)';
     return 'DcsDeviceConnectionException: $message$suffix';
+  }
+}
+
+/// Windows LPT (parallel / document printer) adapter for DCP text.
+///
+/// Opens `\\.\LPTn` for raw write. Discovery always offers LPT1–LPT3; the OS
+/// reports Access Denied / not found only when connecting.
+class DcsLptPortAdapter implements DcsDeviceAdapter {
+  const DcsLptPortAdapter();
+
+  static const candidatePorts = ['LPT1', 'LPT2', 'LPT3'];
+
+  @override
+  DcsDeviceTransport get transport => DcsDeviceTransport.parallel;
+
+  @override
+  Future<List<DcsDiscoveredDevice>> discover() async {
+    return [
+      for (final name in candidatePorts)
+        DcsDiscoveredDevice(
+          id: 'lpt:$name',
+          portName: name,
+          transport: DcsDeviceTransport.parallel,
+          productName: 'Parallel port',
+          metadata: const {'kind': 'lpt'},
+        ),
+    ];
+  }
+
+  @override
+  Future<DcsDeviceSession> connect(
+    DcsDeviceProfile profile,
+    DcsDiscoveredDevice device,
+  ) async {
+    if (profile.connectionType != DcsConnectionType.lpt &&
+        profile.transport != DcsDeviceTransport.parallel) {
+      throw const DcsDeviceConnectionException(
+        'LPT adapter requires an LPT / parallel profile.',
+      );
+    }
+
+    final name = DcsLptPortAdapter.normalizeLptName(
+      profile.comPort?.trim().isNotEmpty == true
+          ? profile.comPort!.trim()
+          : device.portName,
+    );
+    if (name == null) {
+      throw DcsDeviceConnectionException(
+        'Invalid LPT port "${device.portName}". Use LPT1–LPT3.',
+      );
+    }
+
+    try {
+      // Windows device namespace path — required for legacy parallel ports.
+      final resolvedPath =
+          Platform.isWindows ? '\\\\.\\$name' : '/dev/${name.toLowerCase()}';
+      final raf = await File(resolvedPath).open(mode: FileMode.write);
+      return _DcsLptSession(raf, name);
+    } catch (error) {
+      throw DcsDeviceConnectionException(
+        'Could not open LPT port $name — $error',
+      );
+    }
+  }
+
+  /// Accepts LPT1 / lpt1 / LTP1 (common typo) → `LPT1`.
+  static String? normalizeLptName(String raw) {
+    final upper = raw.trim().toUpperCase().replaceAll(r'\\.\', '');
+    final match = RegExp(r'^(LPT|LTP)(\d+)$').firstMatch(upper);
+    if (match == null) return null;
+    return 'LPT${match.group(2)}';
+  }
+}
+
+class _DcsLptSession implements DcsDeviceSession {
+  _DcsLptSession(this._raf, this.portName);
+
+  final RandomAccessFile _raf;
+  final String portName;
+  final StreamController<List<int>> _dataController =
+      StreamController.broadcast();
+  var _closed = false;
+
+  @override
+  Stream<List<int>> get data => _dataController.stream;
+
+  @override
+  bool get isOpen => !_closed;
+
+  @override
+  Future<void> write(List<int> bytes) async {
+    if (!isOpen) {
+      throw const DcsDeviceConnectionException('LPT port is closed.');
+    }
+    await _raf.writeFrom(bytes);
+    await _raf.flush();
+  }
+
+  @override
+  Future<void> ping() async {
+    if (!isOpen) {
+      throw const DcsDeviceConnectionException('LPT port is not open.');
+    }
+  }
+
+  @override
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    try {
+      await _raf.close();
+    } catch (_) {}
+    await _dataController.close();
   }
 }
 

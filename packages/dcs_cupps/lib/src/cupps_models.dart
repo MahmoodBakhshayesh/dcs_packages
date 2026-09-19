@@ -93,7 +93,7 @@ enum CuppsDeviceType {
   barcodeReader('bc', 'bcDeviceParameter'),
   boardingGateReader('bg', 'bgDeviceParameter'),
   passportReader('ms', 'msDeviceParameter'),
-  opticalCardReader('oc', 'ocDeviceParameter'),
+  opticalCardReader('oc', 'ocDeviceParameter'), // CUPPS OCR (passport MRZ)
   documentPrinter('pr', 'prDeviceParameter'),
   biometricReader('be', 'beDeviceParameter'),
   displayDevice('dd', 'ddDeviceParameter'),

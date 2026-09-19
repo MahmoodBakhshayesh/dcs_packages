@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'dcs_adapters.dart';
+import 'dcs_models.dart';
 
 /// Classified outcome for a request/response device command.
 enum DcsDeviceResponseStatus { ok, error, unknown, timeout }
@@ -19,6 +20,8 @@ class DcsDeviceRequestOptions {
     this.quietWindow = const Duration(milliseconds: 150),
     this.encoding = utf8,
     this.framed = false,
+    this.protocolMode,
+    this.waitForResponse = true,
     this.classifier = defaultClassifier,
   });
 
@@ -31,9 +34,24 @@ class DcsDeviceRequestOptions {
   final Encoding encoding;
 
   /// Parses STX/ETX framed responses and unescapes DLE bytes.
+  ///
+  /// Prefer [protocolMode]. When null, [framed] maps to
+  /// [DcsProtocolMode.framed] / [DcsProtocolMode.none].
   final bool framed;
 
+  /// Full protocol mode. When set, overrides [framed].
+  final DcsProtocolMode? protocolMode;
+
+  /// When false, still frames + writes on the per-device queue but does not
+  /// wait for an AEA ack (ATB CP# often never replies).
+  final bool waitForResponse;
+
   final DcsResponseClassifier classifier;
+
+  DcsProtocolMode get resolvedProtocolMode {
+    if (protocolMode != null) return protocolMode!;
+    return framed ? DcsProtocolMode.framed : DcsProtocolMode.none;
+  }
 
   static DcsDeviceResponseStatus defaultClassifier(
     Uint8List bytes,
@@ -42,17 +60,42 @@ class DcsDeviceRequestOptions {
     if (bytes.isEmpty) return DcsDeviceResponseStatus.timeout;
 
     final normalized = text.toUpperCase();
-    if (normalized.contains('ERR') ||
-        normalized.contains('ERROR') ||
-        normalized.contains('NOK')) {
+
+    // Explicit AEA/HDC error verbs only — never match EP params like ERR3IGN.
+    if (_hasHardAeaError(normalized)) {
       return DcsDeviceResponseStatus.error;
     }
-    if (normalized.contains('OK') ||
-        normalized.contains('EPOK') ||
-        normalized.contains('ESOK')) {
+
+    // Success verbs / OK payloads (HDCEPOK, HDCPTOK, HDCMXOK, STATUSOK, …).
+    if (normalized.contains('EPOK') ||
+        normalized.contains('ESOK') ||
+        normalized.contains('PTOK') ||
+        normalized.contains('PROK') ||
+        normalized.contains('OK')) {
       return DcsDeviceResponseStatus.ok;
     }
     return DcsDeviceResponseStatus.unknown;
+  }
+
+  /// True for busy / in-progress device replies (safe to retry).
+  static bool isBusyError(String text) {
+    final n = text.toUpperCase();
+    return n.contains('HDCERR7') ||
+        RegExp(r'(^|[^A-Z0-9])ERR7([^A-Z]|$)').hasMatch(n);
+  }
+
+  static bool _hasHardAeaError(String normalized) {
+    if (normalized.contains('HDCERR') ||
+        normalized.contains('PRERR') ||
+        normalized.contains('PTERR') ||
+        normalized.contains('BTPERR') ||
+        normalized.contains('ATBERR') ||
+        normalized.contains('BGRERR') ||
+        normalized.contains('ERROR')) {
+      return true;
+    }
+    // Token ERR\d (ERR5, ERR6, ERR7) — not ERR3IGN / ERR5PRT param names.
+    return RegExp(r'(^|[^A-Z0-9])ERR\d([^A-Z]|$)').hasMatch(normalized);
   }
 }
 
@@ -119,7 +162,17 @@ class DcsDeviceRequestQueue {
     List<int> command,
     DcsDeviceRequestOptions options,
   ) async {
-    final bytes = await _captureResponse(command, options);
+    final wire = _encodeOutbound(command, options.resolvedProtocolMode);
+    if (!options.waitForResponse) {
+      await _session.write(wire);
+      return DcsDeviceResponse(
+        status: DcsDeviceResponseStatus.ok,
+        bytes: Uint8List(0),
+        text: '',
+        timedOut: false,
+      );
+    }
+    final bytes = await _captureResponse(wire, options);
     final responseBytes = Uint8List.fromList(bytes ?? const []);
     final text = _decode(options.encoding, responseBytes);
     final status = bytes == null
@@ -140,9 +193,10 @@ class DcsDeviceRequestQueue {
   ) async {
     final completer = Completer<List<int>?>();
     final buffer = <int>[];
-    final frameParser = _DcsFrameParser();
+    final frameParser = _DcsFrameParser(keepPreStx: true);
     Timer? quietTimer;
     late final StreamSubscription<List<int>> subscription;
+    final mode = options.resolvedProtocolMode;
 
     void complete(List<int>? bytes) {
       if (completer.isCompleted) return;
@@ -161,17 +215,34 @@ class DcsDeviceRequestQueue {
     }
 
     subscription = _session.data.listen((chunk) {
-      if (options.framed) {
-        final frame = frameParser.add(chunk);
-        if (frame != null) {
-          complete(frame);
-        }
-        return;
-      }
-
-      buffer.addAll(chunk);
-      if (buffer.isNotEmpty) {
-        markRawData();
+      switch (mode) {
+        case DcsProtocolMode.framed:
+          final frame = frameParser.add(chunk);
+          if (frame != null) {
+            complete(frame);
+          }
+          return;
+        case DcsProtocolMode.auto:
+          final frame = frameParser.add(chunk);
+          if (frame != null) {
+            complete(frame);
+            return;
+          }
+          if (!frameParser.sawStx) {
+            buffer
+              ..clear()
+              ..addAll(frameParser.preStxBytes);
+            if (buffer.isNotEmpty) {
+              markRawData();
+            }
+          }
+          return;
+        case DcsProtocolMode.none:
+          buffer.addAll(chunk);
+          if (buffer.isNotEmpty) {
+            markRawData();
+          }
+          return;
       }
     }, onError: completer.completeError);
 
@@ -186,6 +257,44 @@ class DcsDeviceRequestQueue {
   }
 }
 
+List<int> _encodeOutbound(List<int> command, DcsProtocolMode mode) {
+  return DcsAeaFraming.encodeOutbound(command, mode);
+}
+
+/// Frames AEA payloads with STX/ETX (+ DLE escape) for `framed` and `auto`.
+///
+/// `none` leaves bytes unchanged. Already-framed payloads are not double-wrapped.
+abstract final class DcsAeaFraming {
+  static const stx = 0x02;
+  static const etx = 0x03;
+  static const dle = 0x10;
+
+  static List<int> encodeOutbound(List<int> command, DcsProtocolMode mode) {
+    if (mode == DcsProtocolMode.none) return command;
+    if (command.isEmpty) {
+      return const [stx, etx];
+    }
+    // Already framed — do not double-wrap.
+    if (command.first == stx && command.last == etx) {
+      return command;
+    }
+    final escaped = <int>[stx];
+    for (final byte in command) {
+      if (byte == stx || byte == etx || byte == dle) {
+        escaped.add(dle);
+      }
+      escaped.add(byte);
+    }
+    escaped.add(etx);
+    return escaped;
+  }
+}
+
+/// Compatibility alias for [DcsAeaFraming.encodeOutbound].
+List<int> dcsEncodeAeaOutbound(List<int> command, DcsProtocolMode mode) {
+  return DcsAeaFraming.encodeOutbound(command, mode);
+}
+
 String _decode(Encoding encoding, Uint8List bytes) {
   try {
     return encoding.decode(bytes);
@@ -195,21 +304,32 @@ String _decode(Encoding encoding, Uint8List bytes) {
 }
 
 class _DcsFrameParser {
-  static const _stx = 0x02;
-  static const _etx = 0x03;
-  static const _dle = 0x10;
+  _DcsFrameParser({this.keepPreStx = false});
 
+  static const stx = 0x02;
+  static const etx = 0x03;
+  static const dle = 0x10;
+
+  final bool keepPreStx;
   final _buffer = <int>[];
+  final preStxBytes = <int>[];
   var _inFrame = false;
   var _escaped = false;
+  var sawStx = false;
 
   List<int>? add(List<int> chunk) {
     for (final byte in chunk) {
       if (!_inFrame) {
-        if (byte == _stx) {
+        if (byte == stx) {
           _buffer.clear();
           _inFrame = true;
           _escaped = false;
+          sawStx = true;
+          if (keepPreStx) {
+            preStxBytes.clear();
+          }
+        } else if (keepPreStx && !sawStx) {
+          preStxBytes.add(byte);
         }
         continue;
       }
@@ -220,12 +340,12 @@ class _DcsFrameParser {
         continue;
       }
 
-      if (byte == _dle) {
+      if (byte == dle) {
         _escaped = true;
         continue;
       }
 
-      if (byte == _etx) {
+      if (byte == etx) {
         final frame = List<int>.of(_buffer);
         _buffer.clear();
         _inFrame = false;

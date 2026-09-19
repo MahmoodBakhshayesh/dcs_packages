@@ -1,6 +1,6 @@
 name: dcs_device_util
 description: Reliable device discovery, configuration, connection monitoring, and status UI helpers for desktop DCS Flutter applications.
-version: 0.2.0
+version: 0.2.9
 publish_to: none
 repository: https://github.com/MahmoodBakhshayesh/dcs_packages
 issue_tracker: https://github.com/MahmoodBakhshayesh/dcs_packages/issues

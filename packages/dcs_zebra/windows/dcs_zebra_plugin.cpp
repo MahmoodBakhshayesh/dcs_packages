@@ -1,3 +1,16 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+// winsock2 must come before windows.h / Flutter headers that pull winsock.h.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <ws2bth.h>
+#include <bluetoothapis.h>
+
 #include "dcs_zebra_plugin.h"
 
 #include <flutter/method_channel.h>
@@ -12,14 +25,6 @@
 #include <mutex>
 #include <string>
 #include <vector>
-
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <winsock2.h>
-#include <ws2bth.h>
-#include <bluetoothapis.h>
 
 #pragma comment(lib, "Bthprops.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -205,7 +210,7 @@ std::vector<uint8_t> ReadBytes(const std::string& id, int timeoutMs) {
     if (it == g_sockets.end()) return {};
     sock = it->second;
   }
-  DWORD timeout = static_cast<DWORD>(std::max(timeoutMs, 1));
+  DWORD timeout = static_cast<DWORD>((std::max)(timeoutMs, 1));
   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout),
              sizeof(timeout));
   char buffer[4096];

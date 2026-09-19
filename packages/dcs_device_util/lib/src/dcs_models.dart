@@ -7,8 +7,9 @@ enum DcsDeviceRole {
   barcodeReader('bc', 'Barcode Reader', DcsDeviceKind.reader),
   boardingGateReader('bg', 'Boarding Gate Reader', DcsDeviceKind.reader),
   passportReader('ms', 'Passport Reader (MSR)', DcsDeviceKind.reader),
-  opticalCardReader('oc', 'Optical Card Reader', DcsDeviceKind.reader),
-  documentPrinter('pr', 'Document Printer', DcsDeviceKind.printer),
+  /// CUPPS `oc` — Optical Character Recognition (passport MRZ), same scan path as MSR.
+  opticalCardReader('oc', 'Passport Reader (OCR)', DcsDeviceKind.reader),
+  documentPrinter('pr', 'Document Printer (DCP)', DcsDeviceKind.printer),
   biometricReader('be', 'Biometric Reader', DcsDeviceKind.reader),
   displayDevice('dd', 'Display Device', DcsDeviceKind.unknown),
   zlDevice('zl', 'ZL Device', DcsDeviceKind.unknown),
@@ -23,9 +24,23 @@ enum DcsDeviceRole {
   bool get isPrinter => kind == DcsDeviceKind.printer;
   bool get isReader => kind == DcsDeviceKind.reader;
 
+  /// MSR + OCR both deliver passport / MRZ scans into the same bus.
+  bool get isPassportReader =>
+      this == DcsDeviceRole.passportReader ||
+      this == DcsDeviceRole.opticalCardReader;
+
   static DcsDeviceRole? tryParse(String? raw) {
     final value = (raw ?? '').trim().toLowerCase();
     if (value.isEmpty) return null;
+    if (value == 'ocr' || value == 'ocrreader') {
+      return DcsDeviceRole.opticalCardReader;
+    }
+    if (value == 'msr' || value == 'msreader') {
+      return DcsDeviceRole.passportReader;
+    }
+    if (value == 'dcp' || value == 'ltp' || value == 'lpt') {
+      return DcsDeviceRole.documentPrinter;
+    }
     for (final role in DcsDeviceRole.values) {
       if (role.name.toLowerCase() == value || role.code == value) return role;
     }
@@ -41,10 +56,10 @@ enum DcsDeviceRole {
 enum DcsDeviceKind { reader, printer, unknown }
 
 /// Physical or logical transport.
-enum DcsDeviceTransport { serial, usb, network, unknown }
+enum DcsDeviceTransport { serial, usb, network, parallel, unknown }
 
 /// Connection mode selected in Standalone config UI.
-enum DcsConnectionType { com, lan }
+enum DcsConnectionType { com, lan, lpt }
 
 /// Print language / protocol for printer roles.
 enum DcsPrintType { aea, zpl, stimulSoft, ePos }
@@ -263,7 +278,7 @@ class DcsDeviceMatcher {
   final Map<String, String> metadata;
 
   bool matches(DcsDiscoveredDevice device) {
-    if (!_matchesPattern(portName, device.portName)) return false;
+    if (!_matchesPortName(portName, device.portName)) return false;
     if (!_matchesPattern(manufacturer, device.manufacturer)) return false;
     if (!_matchesPattern(productName, device.productName)) return false;
     if (!_matchesPattern(serialNumber, device.serialNumber)) return false;
@@ -444,14 +459,22 @@ DcsDeviceRole _roleFromLegacyKind(DcsDeviceKind kind, String id) {
   if (lower.contains('bg') || lower.contains('gate')) {
     return DcsDeviceRole.boardingGateReader;
   }
-  if (lower.contains('ms') || lower.contains('passport')) {
+  if (lower.contains('ms') ||
+      lower.contains('msr') ||
+      lower.contains('passport')) {
     return DcsDeviceRole.passportReader;
   }
-  if (lower.contains('oc') || lower.contains('optical')) {
-    return DcsDeviceRole.opticalCardReader;
-  }
-  if (lower.contains('pr') || lower.contains('document')) {
+  if (lower.contains('pr') ||
+      lower.contains('dcp') ||
+      lower.contains('document') ||
+      lower.contains('ltp') ||
+      lower.contains('lpt')) {
     return DcsDeviceRole.documentPrinter;
+  }
+  if (lower == 'oc' ||
+      lower.contains('ocr') ||
+      lower.contains('optical')) {
+    return DcsDeviceRole.opticalCardReader;
   }
   return switch (kind) {
     DcsDeviceKind.printer => DcsDeviceRole.boardingPassPrinter,
@@ -561,13 +584,14 @@ class DcsDeviceConfig {
     final byId = {for (final p in profiles) p.id: p};
     final merged = <DcsDeviceProfile>[
       for (final role in DcsDeviceRole.values)
-        byId[role.code] ??
-            DcsDeviceProfile(
-              id: role.code,
-              label: role.label,
-              role: role,
-              enabled: false,
-            ),
+        (byId[role.code] ??
+                DcsDeviceProfile(
+                  id: role.code,
+                  label: role.label,
+                  role: role,
+                  enabled: false,
+                ))
+            .copyWith(label: role.label, role: role),
     ];
     // Keep any custom/extra profiles not in the catalog.
     for (final p in profiles) {
@@ -726,6 +750,24 @@ bool _matchesPattern(Pattern? pattern, String? value) {
   if (pattern == null) return true;
   if (value == null) return false;
   return pattern.allMatches(value).isNotEmpty;
+}
+
+/// COM/LPT port names must be exact (case-insensitive).
+///
+/// Substring [Pattern] matching would let configured `COM4` incorrectly bind to
+/// `COM44` / `COM40` when those ports appear in discovery.
+bool _matchesPortName(Pattern? pattern, String? value) {
+  if (pattern == null) return true;
+  if (value == null) return false;
+  if (pattern is String) {
+    return pattern.trim().toUpperCase() == value.trim().toUpperCase();
+  }
+  if (pattern is RegExp) {
+    final match = pattern.firstMatch(value);
+    return match != null && match.start == 0 && match.end == value.length;
+  }
+  final match = pattern.matchAsPrefix(value);
+  return match != null && match.end == value.length;
 }
 
 Map<String, Object?> _patternToJson(Pattern? pattern) {

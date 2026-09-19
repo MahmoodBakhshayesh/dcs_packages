@@ -167,8 +167,9 @@ final response = await controller.sendTextRequest(
 );
 ```
 
-Enable `framed: true` when the device wraps payloads with `STX`/`ETX`. The queue
-will remove framing bytes and unescape `DLE` before classification.
+Enable `protocolMode: framed` or `auto` for AEA printers — outbound payloads are
+wrapped with `STX`/`ETX` (DLE-escaped). Inbound `auto` still accepts either a
+framed reply or a quiet-window unframed reply. Use `none` only for raw devices.
 
 ## Custom adapters
 

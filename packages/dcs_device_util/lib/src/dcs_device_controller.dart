@@ -21,6 +21,7 @@ class DcsDeviceController {
            const [
              DcsSerialPortAdapter(),
              DcsNetworkPortAdapter(),
+             DcsLptPortAdapter(),
            ],
        _configStore = configStore,
        _retryPolicy = retryPolicy,
@@ -199,11 +200,23 @@ class DcsDeviceController {
   }
 
   Future<void> connectAll() async {
-    for (final profile in _config.profiles.where(
-      (profile) => profile.enabled,
-    )) {
-      await connect(profile.id);
-    }
+    final enabled = _config.profiles.where((profile) => profile.enabled).toList();
+    // Different COM devices connect in parallel; each profile is independent.
+    await Future.wait(
+      enabled.map((profile) async {
+        try {
+          await connect(profile.id);
+        } catch (error, stackTrace) {
+          _log(
+            DcsLogLevel.warning,
+            'Connect-all skipped ${profile.id}.',
+            profileId: profile.id,
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }),
+    );
   }
 
   Future<void> connect(String profileId) async {
@@ -215,6 +228,33 @@ class DcsDeviceController {
     final profile = _profileById(profileId);
     if (profile == null || !profile.enabled) return;
 
+    final port = profile.comPort?.trim();
+    if (port != null &&
+        port.isNotEmpty &&
+        profile.connectionType == DcsConnectionType.com) {
+      final holder = _profileIdHoldingPort(port);
+      if (holder != null && holder != profileId) {
+        final error = DcsDeviceConnectionException(
+          'Serial port $port is already open by profile "$holder". '
+          'Disconnect that device before connecting ${profile.label}.',
+        );
+        _autoConnectBlocked.add(profileId);
+        _setStatus(
+          profileId,
+          DcsDeviceConnectionState.failed,
+          message: error.message,
+          error: error,
+        );
+        _log(
+          DcsLogLevel.error,
+          'Device connection failed.',
+          profileId: profileId,
+          error: error,
+        );
+        return;
+      }
+    }
+
     _autoConnectBlocked.remove(profileId);
     final epoch = _connectEpoch[profileId] ?? 0;
     _connecting.add(profileId);
@@ -225,8 +265,21 @@ class DcsDeviceController {
     }
   }
 
+  String? _profileIdHoldingPort(String portName) {
+    final wanted = portName.trim().toUpperCase();
+    for (final entry in _sessions.entries) {
+      final other = _profileById(entry.key);
+      final otherPort = other?.comPort?.trim().toUpperCase();
+      if (otherPort != null && otherPort == wanted) return entry.key;
+    }
+    return null;
+  }
+
   Future<void> reconnect(String profileId) async {
-    await disconnect(profileId, allowAutoReconnect: true);
+    // Block monitor auto-connect while we settle the COM handle — Windows often
+    // returns ERROR_ACCESS_DENIED (5) if reopen races the previous close.
+    await disconnect(profileId, allowAutoReconnect: false);
+    await Future<void>.delayed(const Duration(milliseconds: 400));
     await discover();
     await connect(profileId);
   }
@@ -500,7 +553,9 @@ class DcsDeviceController {
         final adapter = _adapterFor(
           profile.connectionType == DcsConnectionType.lan
               ? DcsDeviceTransport.network
-              : profile.transport,
+              : profile.connectionType == DcsConnectionType.lpt
+                  ? DcsDeviceTransport.parallel
+                  : profile.transport,
         );
         final session = await adapter.connect(profile, device);
         if (cancelled()) {
@@ -538,6 +593,10 @@ class DcsDeviceController {
           stackTrace: stackTrace,
           data: {'attempt': attempt},
         );
+        // Windows COM reopen often needs extra settle time after Access Denied.
+        if (_isAccessDenied(error) && attempt < _retryPolicy.maxAttempts) {
+          await Future<void>.delayed(Duration(milliseconds: 300 * attempt));
+        }
       }
     }
 
@@ -579,6 +638,43 @@ class DcsDeviceController {
       );
     }
 
+    if (profile.connectionType == DcsConnectionType.lpt) {
+      final port = DcsLptPortAdapter.normalizeLptName(
+            profile.comPort?.trim() ?? '',
+          ) ??
+          'LPT1';
+      for (final device in discoveries) {
+        if (device.transport == DcsDeviceTransport.parallel &&
+            device.portName.toUpperCase() == port) {
+          return device;
+        }
+      }
+      return DcsDiscoveredDevice(
+        id: 'lpt:$port',
+        portName: port,
+        transport: DcsDeviceTransport.parallel,
+        metadata: const {'kind': 'lpt'},
+      );
+    }
+
+    // Prefer an exact configured COM port before fuzzy manufacturer matching.
+    // (Substring port match used to bind COM4 → COM44.)
+    final configuredPort = profile.comPort?.trim();
+    if (configuredPort != null && configuredPort.isNotEmpty) {
+      final wanted = configuredPort.toUpperCase();
+      for (final device in discoveries) {
+        if (device.transport == profile.transport &&
+            device.portName.toUpperCase() == wanted) {
+          return device;
+        }
+      }
+      return DcsDiscoveredDevice(
+        id: 'serial:$configuredPort',
+        portName: configuredPort,
+        transport: DcsDeviceTransport.serial,
+      );
+    }
+
     for (final device in discoveries) {
       if (device.transport == profile.transport &&
           profile.matcher.matches(device)) {
@@ -586,25 +682,15 @@ class DcsDeviceController {
       }
     }
 
-    // Explicit COM port configured — synthesize a target even if discovery missed metadata.
-    final port = profile.comPort?.trim();
-    if (port != null && port.isNotEmpty) {
-      for (final device in discoveries) {
-        if (device.portName.toUpperCase() == port.toUpperCase()) return device;
-      }
-      return DcsDiscoveredDevice(
-        id: 'serial:$port',
-        portName: port,
-        transport: DcsDeviceTransport.serial,
-      );
-    }
     return null;
   }
 
   DcsDeviceAdapter _adapterFor(DcsDeviceTransport transport) {
-    final wanted = transport == DcsDeviceTransport.network
-        ? DcsDeviceTransport.network
-        : DcsDeviceTransport.serial;
+    final wanted = switch (transport) {
+      DcsDeviceTransport.network => DcsDeviceTransport.network,
+      DcsDeviceTransport.parallel => DcsDeviceTransport.parallel,
+      _ => DcsDeviceTransport.serial,
+    };
     for (final adapter in _adapters) {
       if (adapter.transport == wanted) return adapter;
     }
@@ -768,5 +854,16 @@ class DcsDeviceController {
     if (_closed) {
       throw StateError('DcsDeviceController is disposed.');
     }
+  }
+
+  static bool _isAccessDenied(Object error) {
+    if (error is DcsDeviceConnectionException) {
+      if (error.code == 5) return true;
+      final lower = error.message.toLowerCase();
+      return lower.contains('access is denied') ||
+          lower.contains('access denied');
+    }
+    final text = error.toString().toLowerCase();
+    return text.contains('access is denied') || text.contains('access denied');
   }
 }
