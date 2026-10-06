@@ -544,8 +544,8 @@ class DcsRetryPolicy {
 /// Heartbeat settings used to verify an open connection stays alive.
 class DcsConnectionHealthPolicy {
   const DcsConnectionHealthPolicy({
-    this.heartbeatInterval = const Duration(seconds: 5),
-    this.maxMissedHeartbeats = 2,
+    this.heartbeatInterval = const Duration(seconds: 3),
+    this.maxMissedHeartbeats = 1,
   }) : assert(maxMissedHeartbeats >= 0);
 
   final Duration heartbeatInterval;

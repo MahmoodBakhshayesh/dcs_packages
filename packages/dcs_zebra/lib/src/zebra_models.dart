@@ -1,4 +1,4 @@
-enum ZebraConnectionType { tcp, bluetooth, bluetoothLe, usb }
+enum ZebraConnectionType { tcp, bluetooth, bluetoothLe, usb, serial }
 
 enum ZebraPrinterRole { boardingPass, bagTag, generic }
 
@@ -48,6 +48,7 @@ class ZebraPrinterDescriptor {
     this.macAddress,
     this.serialNumber,
     this.model,
+    this.manufacturer,
   });
 
   final String id;
@@ -58,6 +59,9 @@ class ZebraPrinterDescriptor {
   final String? macAddress;
   final String? serialNumber;
   final String? model;
+
+  /// Windows SetupAPI / driver manufacturer (Zebra USB often reports `ZDesigner`).
+  final String? manufacturer;
 
   String get displayName =>
       name.trim().isNotEmpty ? name : '$connectionType:$address';
@@ -71,6 +75,7 @@ class ZebraPrinterDescriptor {
     String? macAddress,
     String? serialNumber,
     String? model,
+    String? manufacturer,
   }) {
     return ZebraPrinterDescriptor(
       id: id ?? this.id,
@@ -81,6 +86,7 @@ class ZebraPrinterDescriptor {
       macAddress: macAddress ?? this.macAddress,
       serialNumber: serialNumber ?? this.serialNumber,
       model: model ?? this.model,
+      manufacturer: manufacturer ?? this.manufacturer,
     );
   }
 }

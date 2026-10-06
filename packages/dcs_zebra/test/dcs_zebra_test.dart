@@ -118,6 +118,63 @@ void main() {
       );
     });
 
+    test('keeps ZDesigner manufacturer even with custom device name', () {
+      expect(
+        ZebraPrinterIdentity.looksLikeZebra(
+          const ZebraPrinterDescriptor(
+            id: 'usb:1',
+            address: r'\\?\usb#vid_0a5f&pid_0080#x',
+            connectionType: ZebraConnectionType.usb,
+            name: 'Front desk printer',
+            manufacturer: 'ZDesigner',
+          ),
+        ),
+        isTrue,
+      );
+    });
+
+    test('rejects non-ZDesigner manufacturer when field is present', () {
+      expect(
+        ZebraPrinterIdentity.looksLikeZebra(
+          const ZebraPrinterDescriptor(
+            id: 'usb:2',
+            address: r'\\?\usb#vid_1234&pid_5678#x',
+            connectionType: ZebraConnectionType.usb,
+            name: 'Some Printer',
+            manufacturer: 'HP',
+          ),
+        ),
+        isFalse,
+      );
+    });
+
+    test('treats Microsoft manufacturer as unknown and uses name heuristics', () {
+      expect(
+        ZebraPrinterIdentity.looksLikeZebra(
+          const ZebraPrinterDescriptor(
+            id: 'serial:COM4',
+            address: 'COM4',
+            connectionType: ZebraConnectionType.serial,
+            name: 'Standard Serial over Bluetooth link (COM4)',
+            manufacturer: 'Microsoft',
+          ),
+        ),
+        isFalse,
+      );
+      expect(
+        ZebraPrinterIdentity.looksLikeZebra(
+          const ZebraPrinterDescriptor(
+            id: 'serial:COM5',
+            address: 'COM5',
+            connectionType: ZebraConnectionType.serial,
+            name: 'ZDesigner ZD421',
+            manufacturer: 'Microsoft',
+          ),
+        ),
+        isTrue,
+      );
+    });
+
     test('rejects non-printer bluetooth devices', () {
       expect(
         ZebraPrinterIdentity.looksLikeZebraText("Mahmood's Buds2"),

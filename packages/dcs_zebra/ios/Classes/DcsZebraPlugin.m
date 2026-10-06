@@ -129,15 +129,7 @@
   NSMutableArray *found = [NSMutableArray array];
   NSArray<EAAccessory *> *accessories = [EAAccessoryManager sharedAccessoryManager].connectedAccessories;
   for (EAAccessory *accessory in accessories) {
-    BOOL zebra = NO;
-    for (NSString *protocol in accessory.protocolStrings) {
-      NSString *lower = protocol.lowercaseString;
-      if ([lower containsString:@"zebra"] || [lower containsString:@"com.zebra"]) {
-        zebra = YES;
-        break;
-      }
-    }
-    if (!zebra) continue;
+    // Include all connected MFi accessories — Zebra printers may use custom names.
     NSString *address = accessory.serialNumber.length > 0 ? accessory.serialNumber : accessory.name;
     [found addObject:@{
       @"id" : [NSString stringWithFormat:@"bluetooth:%@", address],

@@ -206,6 +206,9 @@ class DcsZebraPlugin : FlutterPlugin, MethodCallHandler {
           "macAddress" to printer.discoveryDataMap["MAC_ADDRESS"],
           "serialNumber" to printer.discoveryDataMap["SERIAL_NUMBER"],
           "model" to printer.discoveryDataMap["MODEL_NAME"],
+          "manufacturer" to (printer.discoveryDataMap["COMPANY_NAME"]
+            ?: printer.discoveryDataMap["MANUFACTURER"]
+            ?: "Zebra"),
         )
       }
 

@@ -329,7 +329,28 @@ class DcsDeviceController {
         'No active session for profile $profileId.',
       );
     }
-    await session.write(bytes);
+    try {
+      await session.write(bytes);
+    } catch (error, stackTrace) {
+      await _handleSessionIoFailure(profileId, error, stackTrace);
+      rethrow;
+    }
+  }
+
+  /// Lightweight liveness check for an open session (used before print).
+  Future<void> verifySession(String profileId) async {
+    final session = _sessions[profileId];
+    if (session == null) {
+      throw DcsDeviceConnectionException(
+        'No active session for profile $profileId.',
+      );
+    }
+    try {
+      await session.ping();
+    } catch (error, stackTrace) {
+      await _handleSessionIoFailure(profileId, error, stackTrace);
+      rethrow;
+    }
   }
 
   /// Sends a command and waits for the matching response in profile order.
@@ -338,10 +359,15 @@ class DcsDeviceController {
     List<int> bytes, {
     DcsDeviceRequestOptions options = const DcsDeviceRequestOptions(),
   }) async {
-    return _requestQueueFor(
-      profileId,
-      options,
-    ).sendBytes(bytes, options: options);
+    try {
+      return await _requestQueueFor(
+        profileId,
+        options,
+      ).sendBytes(bytes, options: options);
+    } catch (error, stackTrace) {
+      await _handleSessionIoFailure(profileId, error, stackTrace);
+      rethrow;
+    }
   }
 
   /// Sends encoded text and waits for a classified response.
@@ -350,10 +376,15 @@ class DcsDeviceController {
     String command, {
     DcsDeviceRequestOptions options = const DcsDeviceRequestOptions(),
   }) async {
-    return _requestQueueFor(
-      profileId,
-      options,
-    ).sendText(command, options: options);
+    try {
+      return await _requestQueueFor(
+        profileId,
+        options,
+      ).sendText(command, options: options);
+    } catch (error, stackTrace) {
+      await _handleSessionIoFailure(profileId, error, stackTrace);
+      rethrow;
+    }
   }
 
   Stream<List<int>> dataFor(String profileId) {
@@ -459,9 +490,39 @@ class DcsDeviceController {
       (profile) => profile.enabled,
     )) {
       final status = _statuses[profile.id];
-      if (status == null ||
-          status.isConnected ||
-          _connecting.contains(profile.id) ||
+      if (status == null) continue;
+
+      // Connected / degraded sessions: verify the OS still has the port / socket.
+      if (status.isConnected ||
+          status.state == DcsDeviceConnectionState.degraded) {
+        final session = _sessions[profile.id];
+        if (session == null) {
+          _setStatus(
+            profile.id,
+            DcsDeviceConnectionState.disconnected,
+            message: 'Session lost.',
+          );
+          continue;
+        }
+        try {
+          await session.ping();
+        } catch (error, stackTrace) {
+          _log(
+            DcsLogLevel.warning,
+            'Connected device failed health check.',
+            profileId: profile.id,
+            error: error,
+            stackTrace: stackTrace,
+          );
+          await disconnect(profile.id, allowAutoReconnect: true);
+          if (_config.autoReconnect && !_closed) {
+            unawaited(connect(profile.id));
+          }
+        }
+        continue;
+      }
+
+      if (_connecting.contains(profile.id) ||
           _autoConnectBlocked.contains(profile.id)) {
         continue;
       }
@@ -707,8 +768,51 @@ class DcsDeviceController {
     final controller = _dataControllerFor(profileId);
     _dataSubscriptions[profileId] = session.data.listen(
       controller.add,
-      onError: controller.addError,
+      onError: (Object error, StackTrace stackTrace) {
+        if (!controller.isClosed) {
+          controller.addError(error, stackTrace);
+        }
+        unawaited(_handleSessionIoFailure(profileId, error, stackTrace));
+      },
+      onDone: () {
+        unawaited(
+          _handleSessionIoFailure(
+            profileId,
+            const DcsDeviceConnectionException('Device data stream closed.'),
+            StackTrace.current,
+          ),
+        );
+      },
+      cancelOnError: false,
     );
+  }
+
+  /// Marks the profile disconnected when I/O proves the handle is dead so UI
+  /// does not stay green after the printer is powered off mid-session.
+  Future<void> _handleSessionIoFailure(
+    String profileId,
+    Object error,
+    StackTrace stackTrace,
+  ) async {
+    if (_closed) return;
+    if (!_sessions.containsKey(profileId) && !_connecting.contains(profileId)) {
+      return;
+    }
+    final isConnectionError = error is DcsDeviceConnectionException ||
+        error.toString().toLowerCase().contains('serial') ||
+        error.toString().toLowerCase().contains('socket') ||
+        error.toString().toLowerCase().contains('closed') ||
+        error.toString().toLowerCase().contains('not available');
+    if (!isConnectionError) return;
+
+    _log(
+      DcsLogLevel.warning,
+      'Device I/O failed — marking disconnected.',
+      profileId: profileId,
+      error: error,
+      stackTrace: stackTrace,
+    );
+    await disconnect(profileId, allowAutoReconnect: true);
   }
 
   void _startHealthCheck(String profileId, DcsDeviceSession session) {

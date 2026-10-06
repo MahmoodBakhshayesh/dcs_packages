@@ -205,6 +205,7 @@ class _DcsSerialPortSession implements DcsDeviceSession {
     if (!isOpen) {
       throw const DcsDeviceConnectionException('Serial port is closed.');
     }
+    _ensurePortStillPresent();
     if (bytes.isEmpty) return;
 
     // Match standalone C# SerialPortBase.Send: assert RTS before every write.
@@ -224,6 +225,13 @@ class _DcsSerialPortSession implements DcsDeviceSession {
     final deadline = DateTime.now().add(writeTimeout);
 
     while (offset < data.length) {
+      if (!_port.isOpen) {
+        _closed = true;
+        throw DcsDeviceConnectionException(
+          'Serial port ${_port.name} closed during write '
+          '(offset $offset of ${data.length}).',
+        );
+      }
       final remaining = deadline.difference(DateTime.now());
       if (remaining <= Duration.zero) {
         throw DcsDeviceConnectionException(
@@ -235,9 +243,18 @@ class _DcsSerialPortSession implements DcsDeviceSession {
       final chunk = Uint8List.sublistView(data, offset);
       final timeoutMs = remaining.inMilliseconds.clamp(1, 60000);
       // timeout >= 0 => blocking write up to timeoutMs.
-      final written = _port.write(chunk, timeout: timeoutMs);
+      late final int written;
+      try {
+        written = _port.write(chunk, timeout: timeoutMs);
+      } catch (error) {
+        _closed = true;
+        throw DcsDeviceConnectionException(
+          'Serial write failed on ${_port.name}: $error',
+        );
+      }
       if (written < 0) {
         final error = SerialPort.lastError;
+        _closed = true;
         throw DcsDeviceConnectionException(
           'Serial write failed on ${_port.name}: '
           '${error?.message ?? 'unknown serial error'}',
@@ -257,6 +274,32 @@ class _DcsSerialPortSession implements DcsDeviceSession {
   Future<void> ping() async {
     if (!isOpen) {
       throw const DcsDeviceConnectionException('Serial port is not open.');
+    }
+    _ensurePortStillPresent();
+    // Touch the handle — when the printer is powered off Windows may keep
+    // isOpen=true until I/O; bytesAvailable / config often fail sooner.
+    try {
+      // ignore: unnecessary_statements
+      _port.bytesAvailable;
+      final _ = _port.config;
+    } catch (error) {
+      _closed = true;
+      throw DcsDeviceConnectionException(
+        'Serial port ${_port.name} is no longer healthy: $error',
+      );
+    }
+  }
+
+  void _ensurePortStillPresent() {
+    final name = _port.name?.trim() ?? '';
+    if (name.isEmpty) return;
+    final available = SerialPort.availablePorts;
+    final present = available.any((p) => p.trim().toUpperCase() == name.toUpperCase());
+    if (!present) {
+      _closed = true;
+      throw DcsDeviceConnectionException(
+        'Serial port $name is no longer available (device unplugged or powered off).',
+      );
     }
   }
 
@@ -299,14 +342,29 @@ class _DcsNetworkSession implements DcsDeviceSession {
     if (!isOpen) {
       throw const DcsDeviceConnectionException('LAN socket is closed.');
     }
-    _socket.add(bytes);
-    await _socket.flush();
+    try {
+      _socket.add(bytes);
+      await _socket.flush();
+    } catch (error) {
+      _closed = true;
+      throw DcsDeviceConnectionException('LAN write failed: $error');
+    }
   }
 
   @override
   Future<void> ping() async {
     if (!isOpen) {
       throw const DcsDeviceConnectionException('LAN socket is not open.');
+    }
+    try {
+      // Accessing remoteAddress throws when the peer is gone.
+      // ignore: unnecessary_statements
+      _socket.remoteAddress;
+    } catch (error) {
+      _closed = true;
+      throw DcsDeviceConnectionException(
+        'LAN socket is no longer healthy: $error',
+      );
     }
   }
 

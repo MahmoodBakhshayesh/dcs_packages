@@ -353,6 +353,7 @@ class ZebraPrinter {
       case ZebraConnectionType.bluetooth:
       case ZebraConnectionType.bluetoothLe:
       case ZebraConnectionType.usb:
+      case ZebraConnectionType.serial:
         return MethodChannelZebraTransport(
           descriptor: descriptor,
           logger: _logger,

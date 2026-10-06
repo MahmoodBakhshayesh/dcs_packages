@@ -10,6 +10,11 @@
 #include <windows.h>
 #include <ws2bth.h>
 #include <bluetoothapis.h>
+#include <setupapi.h>
+#include <cfgmgr32.h>
+#include <initguid.h>
+#include <devguid.h>
+#include <usbiodef.h>
 
 #include "dcs_zebra_plugin.h"
 
@@ -23,11 +28,25 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
 #pragma comment(lib, "Bthprops.lib")
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "cfgmgr32.lib")
+
+// Serial / COM port device interface GUID.
+DEFINE_GUID(GUID_DEVINTERFACE_COMPORT,
+            0x86e0d1e0L, 0x8089, 0x11d0,
+            0x9c, 0xe4, 0x08, 0x00, 0x3e, 0x30, 0x1f, 0x73);
+
+// USB printer class interface (usbprint.sys) — required for raw ZPL to
+// desktop Zebra printers that do not expose a virtual COM port.
+DEFINE_GUID(GUID_DEVINTERFACE_USBPRINT,
+            0x28d78fadL, 0x5a12, 0x11d1,
+            0xae, 0x5b, 0x00, 0x00, 0xf8, 0x03, 0xa8, 0xc2);
 
 namespace dcs_zebra {
 
@@ -37,8 +56,9 @@ using flutter::EncodableList;
 using flutter::EncodableMap;
 using flutter::EncodableValue;
 
-std::mutex g_socket_mutex;
+std::mutex g_io_mutex;
 std::map<std::string, SOCKET> g_sockets;
+std::map<std::string, HANDLE> g_serial_handles;
 bool g_wsa_started = false;
 
 std::string Narrow(const std::wstring& input) {
@@ -53,29 +73,14 @@ std::string Narrow(const std::wstring& input) {
   return out;
 }
 
-std::string ToLower(std::string value) {
-  for (auto& c : value) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-  return value;
-}
-
-bool LooksLikeZebra(const std::string& name) {
-  const std::string lower = ToLower(name);
-  if (lower.empty()) return false;
-  // Reject common non-printer Bluetooth accessories.
-  const char* negatives[] = {
-      "buds", "airpods", "headset", "headphone", "earbud", "speaker",
-      "watch", "phone", "mouse", "keyboard", "gamepad", "controller",
-      "beats", "audio", "tv"};
-  for (const char* token : negatives) {
-    if (lower.find(token) != std::string::npos) return false;
+std::wstring Widen(const std::string& input) {
+  if (input.empty()) return {};
+  int size = MultiByteToWideChar(CP_UTF8, 0, input.c_str(), -1, nullptr, 0);
+  std::wstring out(size > 0 ? size - 1 : 0, L'\0');
+  if (size > 0) {
+    MultiByteToWideChar(CP_UTF8, 0, input.c_str(), -1, out.data(), size);
   }
-  const char* positives[] = {
-      "zebra", "zq", "zd", "zt", "zr", "ql", "gc", "gk", "gx",
-      "imz", "mz", "printer", "tln", "tlg"};
-  for (const char* token : positives) {
-    if (lower.find(token) != std::string::npos) return true;
-  }
-  return false;
+  return out;
 }
 
 std::string FormatBtAddress(const BLUETOOTH_ADDRESS& address) {
@@ -114,6 +119,236 @@ void CloseSocketLocked(const std::string& id) {
   g_sockets.erase(it);
 }
 
+void CloseSerialLocked(const std::string& id) {
+  auto it = g_serial_handles.find(id);
+  if (it == g_serial_handles.end()) return;
+  CloseHandle(it->second);
+  g_serial_handles.erase(it);
+}
+
+void CloseAnyLocked(const std::string& id) {
+  CloseSocketLocked(id);
+  CloseSerialLocked(id);
+}
+
+std::string RegistryPropertyString(HDEVINFO info, SP_DEVINFO_DATA* data,
+                                   DWORD property) {
+  DWORD type = 0;
+  DWORD size = 0;
+  SetupDiGetDeviceRegistryPropertyW(info, data, property, &type, nullptr, 0,
+                                    &size);
+  if (size == 0) return {};
+  std::vector<BYTE> buffer(size);
+  if (!SetupDiGetDeviceRegistryPropertyW(info, data, property, &type,
+                                         buffer.data(), size, &size)) {
+    return {};
+  }
+  if (type != REG_SZ && type != REG_MULTI_SZ) return {};
+  return Narrow(reinterpret_cast<wchar_t*>(buffer.data()));
+}
+
+std::string ToLowerCopy(std::string value) {
+  for (auto& c : value) {
+    c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+  }
+  return value;
+}
+
+bool IsGenericManufacturer(const std::string& manufacturer) {
+  std::string lower = ToLowerCopy(manufacturer);
+  // Trim
+  while (!lower.empty() && (lower.front() == ' ' || lower.front() == '\t')) {
+    lower.erase(lower.begin());
+  }
+  while (!lower.empty() && (lower.back() == ' ' || lower.back() == '\t')) {
+    lower.pop_back();
+  }
+  if (lower.empty()) return true;
+  // COM "Standard Serial over Bluetooth link" reports Microsoft — Device Manager
+  // shows the Bluetooth/USB parent manufacturer instead.
+  return lower == "microsoft" || lower == "microsoft corporation" ||
+         lower == "(standard system devices)" ||
+         lower == "standard system devices" ||
+         lower.rfind("(standard ", 0) == 0;
+}
+
+std::string DevNodePropertyString(DEVINST inst, ULONG property) {
+  WCHAR buffer[512] = {};
+  ULONG size = sizeof(buffer);
+  ULONG type = 0;
+  if (CM_Get_DevNode_Registry_PropertyW(inst, property, &type, buffer, &size,
+                                        0) != CR_SUCCESS) {
+    return {};
+  }
+  if (type != REG_SZ && type != REG_MULTI_SZ) return {};
+  return Narrow(buffer);
+}
+
+/// Prefer a non-generic manufacturer: walk parent chain like Device Manager.
+std::string ResolveManufacturer(HDEVINFO info, SP_DEVINFO_DATA* data) {
+  std::string mfg = RegistryPropertyString(info, data, SPDRP_MFG);
+  if (!IsGenericManufacturer(mfg)) return mfg;
+
+  DEVINST current = data->DevInst;
+  for (int depth = 0; depth < 8; ++depth) {
+    DEVINST parent = 0;
+    if (CM_Get_Parent(&parent, current, 0) != CR_SUCCESS) break;
+    std::string parent_mfg = DevNodePropertyString(parent, CM_DRP_MFG);
+    if (!IsGenericManufacturer(parent_mfg)) return parent_mfg;
+    current = parent;
+  }
+  // Keep leaf manufacturer only when nothing better was found.
+  return IsGenericManufacturer(mfg) ? std::string{} : mfg;
+}
+
+std::string ExtractComPort(const std::string& text) {
+  // Prefer explicit COMn tokens.
+  for (size_t i = 0; i + 3 < text.size(); ++i) {
+    if ((text[i] == 'C' || text[i] == 'c') &&
+        (text[i + 1] == 'O' || text[i + 1] == 'o') &&
+        (text[i + 2] == 'M' || text[i + 2] == 'm') &&
+        std::isdigit(static_cast<unsigned char>(text[i + 3]))) {
+      size_t end = i + 3;
+      while (end < text.size() &&
+             std::isdigit(static_cast<unsigned char>(text[end]))) {
+        ++end;
+      }
+      std::string port = text.substr(i, end - i);
+      for (auto& c : port) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+      return port;
+    }
+  }
+  return {};
+}
+
+struct UsbIdentity {
+  std::string vid;
+  std::string pid;
+  std::string serial;
+};
+
+UsbIdentity ParseUsbIdentity(const std::string& path) {
+  UsbIdentity out;
+  const std::string lower = ToLowerCopy(path);
+  auto vidPos = lower.find("vid_");
+  if (vidPos != std::string::npos && vidPos + 8 <= lower.size()) {
+    out.vid = lower.substr(vidPos + 4, 4);
+  }
+  auto pidPos = lower.find("pid_");
+  if (pidPos != std::string::npos && pidPos + 8 <= lower.size()) {
+    out.pid = lower.substr(pidPos + 4, 4);
+  }
+  // Path form: \\?\usb#vid_xxxx&pid_yyyy#SERIAL#{guid}
+  auto hash1 = lower.find('#');
+  if (hash1 != std::string::npos) {
+    auto hash2 = lower.find('#', hash1 + 1);
+    if (hash2 != std::string::npos) {
+      auto hash3 = lower.find('#', hash2 + 1);
+      if (hash3 != std::string::npos && hash3 > hash2 + 1) {
+        out.serial = lower.substr(hash2 + 1, hash3 - hash2 - 1);
+      }
+    }
+  }
+  return out;
+}
+
+bool IsUsbPrintGuid(const std::string& path) {
+  return ToLowerCopy(path).find("28d78fad-5a12-11d1-ae5b-0000f803a8c2") !=
+         std::string::npos;
+}
+
+EncodableList EnumerateDeviceInterfaces(const GUID& guid) {
+  EncodableList found;
+  HDEVINFO info = SetupDiGetClassDevsW(&guid, nullptr, nullptr,
+                                       DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+  if (info == INVALID_HANDLE_VALUE) return found;
+
+  SP_DEVICE_INTERFACE_DATA iface{};
+  iface.cbSize = sizeof(iface);
+  for (DWORD index = 0;
+       SetupDiEnumDeviceInterfaces(info, nullptr, &guid, index, &iface);
+       ++index) {
+    DWORD required = 0;
+    SetupDiGetDeviceInterfaceDetailW(info, &iface, nullptr, 0, &required,
+                                     nullptr);
+    if (required == 0) continue;
+    std::vector<BYTE> detail_buffer(required);
+    auto* detail =
+        reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(detail_buffer.data());
+    detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+    SP_DEVINFO_DATA dev{};
+    dev.cbSize = sizeof(dev);
+    if (!SetupDiGetDeviceInterfaceDetailW(info, &iface, detail, required,
+                                          nullptr, &dev)) {
+      continue;
+    }
+
+    EncodableMap map;
+    map[EncodableValue("path")] = EncodableValue(Narrow(detail->DevicePath));
+    map[EncodableValue("friendly")] =
+        EncodableValue(RegistryPropertyString(info, &dev, SPDRP_FRIENDLYNAME));
+    map[EncodableValue("description")] =
+        EncodableValue(RegistryPropertyString(info, &dev, SPDRP_DEVICEDESC));
+    map[EncodableValue("hardwareId")] =
+        EncodableValue(RegistryPropertyString(info, &dev, SPDRP_HARDWAREID));
+    map[EncodableValue("manufacturer")] =
+        EncodableValue(ResolveManufacturer(info, &dev));
+    found.push_back(EncodableValue(map));
+  }
+  SetupDiDestroyDeviceInfoList(info);
+  return found;
+}
+
+std::string FindUsbPrintPathForIdentity(const UsbIdentity& identity) {
+  if (identity.vid.empty() || identity.pid.empty()) return {};
+  auto printers = EnumerateDeviceInterfaces(GUID_DEVINTERFACE_USBPRINT);
+  for (const auto& item : printers) {
+    const auto* map = std::get_if<EncodableMap>(&item);
+    if (map == nullptr) continue;
+    auto pathIt = map->find(EncodableValue("path"));
+    if (pathIt == map->end()) continue;
+    const auto* path = std::get_if<std::string>(&pathIt->second);
+    if (path == nullptr || path->empty()) continue;
+    const UsbIdentity other = ParseUsbIdentity(*path);
+    if (other.vid != identity.vid || other.pid != identity.pid) continue;
+    if (!identity.serial.empty() && !other.serial.empty() &&
+        other.serial != identity.serial) {
+      continue;
+    }
+    return *path;
+  }
+  // Fall back to first matching VID/PID even without serial match.
+  for (const auto& item : printers) {
+    const auto* map = std::get_if<EncodableMap>(&item);
+    if (map == nullptr) continue;
+    auto pathIt = map->find(EncodableValue("path"));
+    if (pathIt == map->end()) continue;
+    const auto* path = std::get_if<std::string>(&pathIt->second);
+    if (path == nullptr || path->empty()) continue;
+    const UsbIdentity other = ParseUsbIdentity(*path);
+    if (other.vid == identity.vid && other.pid == identity.pid) {
+      return *path;
+    }
+  }
+  return {};
+}
+
+std::string ResolveUsbOpenPath(const std::string& address) {
+  if (address.empty()) return {};
+  if (IsUsbPrintGuid(address)) return address;
+  if (ToLowerCopy(address).rfind("com", 0) == 0) return {};
+
+  // Generic USB_DEVICE path → locate matching usbprint.sys interface.
+  const UsbIdentity identity = ParseUsbIdentity(address);
+  std::string print_path = FindUsbPrintPathForIdentity(identity);
+  if (!print_path.empty()) return print_path;
+
+  // Last resort: try the given path directly (some stacks accept it).
+  return address;
+}
+
+std::string ConnectSerial(const std::string& id, const std::string& address);
+
 EncodableList DiscoverBluetooth() {
   EncodableList found;
   BLUETOOTH_DEVICE_SEARCH_PARAMS search{};
@@ -136,9 +371,6 @@ EncodableList DiscoverBluetooth() {
 
   do {
     std::string name = Narrow(info.szName);
-    if (!LooksLikeZebra(name)) {
-      continue;
-    }
     std::string address = FormatBtAddress(info.Address);
     EncodableMap map;
     map[EncodableValue("id")] = EncodableValue("bluetooth:" + address);
@@ -152,7 +384,285 @@ EncodableList DiscoverBluetooth() {
   return found;
 }
 
-EncodableList DiscoverUsb() { return EncodableList(); }
+EncodableList DiscoverComPorts() {
+  EncodableList found;
+  std::set<std::string> seen;
+
+  HDEVINFO info = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_COMPORT, nullptr,
+                                       nullptr,
+                                       DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+  if (info != INVALID_HANDLE_VALUE) {
+    SP_DEVICE_INTERFACE_DATA iface{};
+    iface.cbSize = sizeof(iface);
+    for (DWORD index = 0;
+         SetupDiEnumDeviceInterfaces(info, nullptr, &GUID_DEVINTERFACE_COMPORT,
+                                     index, &iface);
+         ++index) {
+      DWORD required = 0;
+      SetupDiGetDeviceInterfaceDetailW(info, &iface, nullptr, 0, &required,
+                                       nullptr);
+      if (required == 0) continue;
+      std::vector<BYTE> detail_buffer(required);
+      auto* detail =
+          reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(detail_buffer.data());
+      detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+      SP_DEVINFO_DATA dev{};
+      dev.cbSize = sizeof(dev);
+      if (!SetupDiGetDeviceInterfaceDetailW(info, &iface, detail, required,
+                                            nullptr, &dev)) {
+        continue;
+      }
+
+      std::string friendly =
+          RegistryPropertyString(info, &dev, SPDRP_FRIENDLYNAME);
+      std::string description =
+          RegistryPropertyString(info, &dev, SPDRP_DEVICEDESC);
+      std::string manufacturer = ResolveManufacturer(info, &dev);
+      std::string port = ExtractComPort(friendly);
+      if (port.empty()) port = ExtractComPort(description);
+      if (port.empty()) {
+        // Fallback: parse \\.\COMn from device path.
+        port = ExtractComPort(Narrow(detail->DevicePath));
+      }
+      if (port.empty()) continue;
+      if (!seen.insert(port).second) continue;
+
+      std::string name = friendly.empty() ? description : friendly;
+      if (name.empty()) name = port;
+
+      EncodableMap map;
+      map[EncodableValue("id")] = EncodableValue("serial:" + port);
+      map[EncodableValue("address")] = EncodableValue(port);
+      map[EncodableValue("connectionType")] = EncodableValue("serial");
+      map[EncodableValue("name")] = EncodableValue(name);
+      map[EncodableValue("model")] = EncodableValue(description);
+      if (!manufacturer.empty()) {
+        map[EncodableValue("manufacturer")] = EncodableValue(manufacturer);
+      }
+      found.push_back(EncodableValue(map));
+    }
+    SetupDiDestroyDeviceInfoList(info);
+  }
+
+  // Also include DOS device names (covers ports SetupAPI may miss).
+  char buffer[65536] = {};
+  DWORD n = QueryDosDeviceA(nullptr, buffer, static_cast<DWORD>(sizeof(buffer)));
+  if (n != 0) {
+    for (const char* p = buffer; *p; p += strlen(p) + 1) {
+      std::string name = p;
+      if (name.size() < 4) continue;
+      if (!(name[0] == 'C' || name[0] == 'c')) continue;
+      if (!(name[1] == 'O' || name[1] == 'o')) continue;
+      if (!(name[2] == 'M' || name[2] == 'm')) continue;
+      if (!std::isdigit(static_cast<unsigned char>(name[3]))) continue;
+      for (auto& c : name) {
+        c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+      }
+      if (!seen.insert(name).second) continue;
+      EncodableMap map;
+      map[EncodableValue("id")] = EncodableValue("serial:" + name);
+      map[EncodableValue("address")] = EncodableValue(name);
+      map[EncodableValue("connectionType")] = EncodableValue("serial");
+      map[EncodableValue("name")] = EncodableValue(name);
+      found.push_back(EncodableValue(map));
+    }
+  }
+
+  return found;
+}
+
+EncodableList DiscoverUsb() {
+  EncodableList found;
+  std::set<std::string> seen_ids;
+
+  auto pushUsb = [&](const std::string& open_path, const std::string& name,
+                     const std::string& description, const std::string& serial,
+                     const std::string& manufacturer) {
+    if (open_path.empty()) return;
+    const std::string id = "usb:" + open_path;
+    if (!seen_ids.insert(id).second) return;
+    EncodableMap map;
+    map[EncodableValue("id")] = EncodableValue(id);
+    map[EncodableValue("address")] = EncodableValue(open_path);
+    map[EncodableValue("connectionType")] = EncodableValue("usb");
+    map[EncodableValue("name")] = EncodableValue(name.empty() ? open_path : name);
+    map[EncodableValue("model")] = EncodableValue(description);
+    if (!serial.empty()) {
+      map[EncodableValue("serialNumber")] = EncodableValue(serial);
+    }
+    if (!manufacturer.empty()) {
+      map[EncodableValue("manufacturer")] = EncodableValue(manufacturer);
+    }
+    found.push_back(EncodableValue(map));
+  };
+
+  // Prefer usbprint.sys interfaces — these are openable for raw ZPL.
+  for (const auto& item : EnumerateDeviceInterfaces(GUID_DEVINTERFACE_USBPRINT)) {
+    const auto* map = std::get_if<EncodableMap>(&item);
+    if (map == nullptr) continue;
+    auto pathIt = map->find(EncodableValue("path"));
+    auto friendlyIt = map->find(EncodableValue("friendly"));
+    auto descIt = map->find(EncodableValue("description"));
+    auto mfgIt = map->find(EncodableValue("manufacturer"));
+    const auto* path = pathIt == map->end()
+                           ? nullptr
+                           : std::get_if<std::string>(&pathIt->second);
+    if (path == nullptr || path->empty()) continue;
+    std::string friendly;
+    std::string description;
+    std::string manufacturer;
+    if (friendlyIt != map->end()) {
+      if (const auto* s = std::get_if<std::string>(&friendlyIt->second)) {
+        friendly = *s;
+      }
+    }
+    if (descIt != map->end()) {
+      if (const auto* s = std::get_if<std::string>(&descIt->second)) {
+        description = *s;
+      }
+    }
+    if (mfgIt != map->end()) {
+      if (const auto* s = std::get_if<std::string>(&mfgIt->second)) {
+        manufacturer = *s;
+      }
+    }
+    const UsbIdentity identity = ParseUsbIdentity(*path);
+    std::string name = friendly.empty() ? description : friendly;
+    pushUsb(*path, name, description, identity.serial, manufacturer);
+  }
+
+  // Also surface generic USB devices (e.g. Zebra VID 0a5f), remapping to
+  // usbprint path when available so Connect works from the listed address.
+  for (const auto& item :
+       EnumerateDeviceInterfaces(GUID_DEVINTERFACE_USB_DEVICE)) {
+    const auto* map = std::get_if<EncodableMap>(&item);
+    if (map == nullptr) continue;
+    auto pathIt = map->find(EncodableValue("path"));
+    auto friendlyIt = map->find(EncodableValue("friendly"));
+    auto descIt = map->find(EncodableValue("description"));
+    auto mfgIt = map->find(EncodableValue("manufacturer"));
+    const auto* path = pathIt == map->end()
+                           ? nullptr
+                           : std::get_if<std::string>(&pathIt->second);
+    if (path == nullptr || path->empty()) continue;
+
+    std::string friendly;
+    std::string description;
+    std::string manufacturer;
+    if (friendlyIt != map->end()) {
+      if (const auto* s = std::get_if<std::string>(&friendlyIt->second)) {
+        friendly = *s;
+      }
+    }
+    if (descIt != map->end()) {
+      if (const auto* s = std::get_if<std::string>(&descIt->second)) {
+        description = *s;
+      }
+    }
+    if (mfgIt != map->end()) {
+      if (const auto* s = std::get_if<std::string>(&mfgIt->second)) {
+        manufacturer = *s;
+      }
+    }
+
+    // Skip non-printer noise unless it looks like Zebra / already has a COM.
+    const UsbIdentity identity = ParseUsbIdentity(*path);
+    const std::string hay = ToLowerCopy(friendly + " " + description + " " +
+                                        manufacturer + " " + *path);
+    const bool zebra_vid = identity.vid == "0a5f";
+    const bool name_hint =
+        hay.find("zebra") != std::string::npos ||
+        hay.find("zdesigner") != std::string::npos ||
+        hay.find("printer") != std::string::npos;
+    std::string com = ExtractComPort(friendly);
+    if (com.empty()) com = ExtractComPort(description);
+    if (!zebra_vid && !name_hint && com.empty()) continue;
+
+    if (!com.empty()) {
+      const std::string id = "serial:" + com;
+      if (!seen_ids.insert(id).second) continue;
+      EncodableMap entry;
+      entry[EncodableValue("id")] = EncodableValue(id);
+      entry[EncodableValue("address")] = EncodableValue(com);
+      entry[EncodableValue("connectionType")] = EncodableValue("serial");
+      entry[EncodableValue("name")] =
+          EncodableValue((friendly.empty() ? description : friendly) + " (" +
+                         com + ")");
+      entry[EncodableValue("model")] = EncodableValue(description);
+      if (!manufacturer.empty()) {
+        entry[EncodableValue("manufacturer")] = EncodableValue(manufacturer);
+      }
+      found.push_back(EncodableValue(entry));
+      continue;
+    }
+
+    std::string open_path = FindUsbPrintPathForIdentity(identity);
+    if (open_path.empty()) open_path = *path;
+    std::string name = friendly.empty() ? description : friendly;
+    pushUsb(open_path, name, description, identity.serial, manufacturer);
+  }
+
+  return found;
+}
+
+std::string ConnectUsb(const std::string& id, const std::string& address) {
+  std::string upper = address;
+  for (auto& c : upper) {
+    c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+  }
+  if (upper.rfind("COM", 0) == 0) {
+    return ConnectSerial(id, upper);
+  }
+
+  const std::string open_path = ResolveUsbOpenPath(address);
+  if (open_path.empty()) {
+    return "Could not resolve a USB printer interface for this device.";
+  }
+
+  // usbprint.sys typically wants GENERIC_WRITE + FILE_SHARE_READ + OPEN_ALWAYS
+  // (or OPEN_EXISTING). Try a few combinations for driver quirks.
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  const DWORD accesses[] = {
+      GENERIC_READ | GENERIC_WRITE,
+      GENERIC_WRITE,
+  };
+  const DWORD shares[] = {
+      FILE_SHARE_READ | FILE_SHARE_WRITE,
+      FILE_SHARE_READ,
+      0,
+  };
+  const DWORD dispositions[] = {OPEN_EXISTING, OPEN_ALWAYS};
+
+  DWORD last_error = 0;
+  const std::wstring wide_path = Widen(open_path);
+  for (DWORD access : accesses) {
+    for (DWORD share : shares) {
+      for (DWORD disposition : dispositions) {
+        handle = CreateFileW(wide_path.c_str(), access, share, nullptr,
+                             disposition,
+                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+                             nullptr);
+        if (handle != INVALID_HANDLE_VALUE) break;
+        last_error = GetLastError();
+      }
+      if (handle != INVALID_HANDLE_VALUE) break;
+    }
+    if (handle != INVALID_HANDLE_VALUE) break;
+  }
+
+  if (handle == INVALID_HANDLE_VALUE) {
+    return "Failed to open USB printer (Win32 " + std::to_string(last_error) +
+           "). Path: " + open_path +
+           ". Close Windows print jobs / other apps using the printer and retry.";
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(g_io_mutex);
+    CloseAnyLocked(id);
+    g_serial_handles[id] = handle;
+  }
+  return {};
+}
 
 std::string ConnectBluetooth(const std::string& id, const std::string& address) {
   if (!EnsureWsa()) {
@@ -183,15 +693,80 @@ std::string ConnectBluetooth(const std::string& id, const std::string& address) 
   }
 
   {
-    std::lock_guard<std::mutex> lock(g_socket_mutex);
-    CloseSocketLocked(id);
+    std::lock_guard<std::mutex> lock(g_io_mutex);
+    CloseAnyLocked(id);
     g_sockets[id] = sock;
   }
   return {};
 }
 
+std::string ConnectSerial(const std::string& id, const std::string& address) {
+  std::string port = address;
+  for (auto& c : port) {
+    c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+  }
+  if (port.rfind("COM", 0) != 0) {
+    return "Invalid COM port address (expected COMn)";
+  }
+
+  // COM10+ requires the \\.\ prefix.
+  std::string path = "\\\\.\\" + port;
+  HANDLE handle = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                              nullptr, OPEN_EXISTING, 0, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    return "Failed to open " + port + " (Win32 " +
+           std::to_string(GetLastError()) +
+           "). Close other apps using this port and retry.";
+  }
+
+  DCB dcb{};
+  dcb.DCBlength = sizeof(dcb);
+  if (!GetCommState(handle, &dcb)) {
+    CloseHandle(handle);
+    return "GetCommState failed for " + port;
+  }
+  // Link-OS USB/serial printers commonly use 115200 8N1.
+  dcb.BaudRate = CBR_115200;
+  dcb.ByteSize = 8;
+  dcb.Parity = NOPARITY;
+  dcb.StopBits = ONESTOPBIT;
+  dcb.fBinary = TRUE;
+  dcb.fDtrControl = DTR_CONTROL_ENABLE;
+  dcb.fRtsControl = RTS_CONTROL_ENABLE;
+  if (!SetCommState(handle, &dcb)) {
+    CloseHandle(handle);
+    return "SetCommState failed for " + port;
+  }
+
+  COMMTIMEOUTS timeouts{};
+  timeouts.ReadIntervalTimeout = 50;
+  timeouts.ReadTotalTimeoutConstant = 2000;
+  timeouts.ReadTotalTimeoutMultiplier = 10;
+  timeouts.WriteTotalTimeoutConstant = 2000;
+  timeouts.WriteTotalTimeoutMultiplier = 10;
+  SetCommTimeouts(handle, &timeouts);
+  SetupComm(handle, 8192, 8192);
+  PurgeComm(handle, PURGE_RXCLEAR | PURGE_TXCLEAR);
+
+  {
+    std::lock_guard<std::mutex> lock(g_io_mutex);
+    CloseAnyLocked(id);
+    g_serial_handles[id] = handle;
+  }
+  return {};
+}
+
 std::string WriteBytes(const std::string& id, const std::vector<uint8_t>& bytes) {
-  std::lock_guard<std::mutex> lock(g_socket_mutex);
+  std::lock_guard<std::mutex> lock(g_io_mutex);
+  auto serial = g_serial_handles.find(id);
+  if (serial != g_serial_handles.end()) {
+    DWORD written = 0;
+    if (!WriteFile(serial->second, bytes.data(),
+                   static_cast<DWORD>(bytes.size()), &written, nullptr)) {
+      return "Serial write failed (Win32 " + std::to_string(GetLastError()) + ")";
+    }
+    return {};
+  }
   auto it = g_sockets.find(id);
   if (it == g_sockets.end()) return "Not connected";
   int sent = send(it->second, reinterpret_cast<const char*>(bytes.data()),
@@ -203,13 +778,36 @@ std::string WriteBytes(const std::string& id, const std::vector<uint8_t>& bytes)
 }
 
 std::vector<uint8_t> ReadBytes(const std::string& id, int timeoutMs) {
+  HANDLE serial = INVALID_HANDLE_VALUE;
   SOCKET sock = INVALID_SOCKET;
   {
-    std::lock_guard<std::mutex> lock(g_socket_mutex);
-    auto it = g_sockets.find(id);
-    if (it == g_sockets.end()) return {};
-    sock = it->second;
+    std::lock_guard<std::mutex> lock(g_io_mutex);
+    auto sit = g_serial_handles.find(id);
+    if (sit != g_serial_handles.end()) {
+      serial = sit->second;
+    } else {
+      auto it = g_sockets.find(id);
+      if (it == g_sockets.end()) return {};
+      sock = it->second;
+    }
   }
+
+  if (serial != INVALID_HANDLE_VALUE) {
+    COMMTIMEOUTS timeouts{};
+    timeouts.ReadIntervalTimeout = 50;
+    timeouts.ReadTotalTimeoutConstant = static_cast<DWORD>((std::max)(timeoutMs, 1));
+    timeouts.ReadTotalTimeoutMultiplier = 0;
+    timeouts.WriteTotalTimeoutConstant = 2000;
+    timeouts.WriteTotalTimeoutMultiplier = 10;
+    SetCommTimeouts(serial, &timeouts);
+    char buffer[4096];
+    DWORD n = 0;
+    if (!ReadFile(serial, buffer, sizeof(buffer), &n, nullptr) || n == 0) {
+      return {};
+    }
+    return std::vector<uint8_t>(buffer, buffer + n);
+  }
+
   DWORD timeout = static_cast<DWORD>((std::max)(timeoutMs, 1));
   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout),
              sizeof(timeout));
@@ -217,6 +815,11 @@ std::vector<uint8_t> ReadBytes(const std::string& id, int timeoutMs) {
   int n = recv(sock, buffer, sizeof(buffer), 0);
   if (n <= 0) return {};
   return std::vector<uint8_t>(buffer, buffer + n);
+}
+
+bool Wants(const std::vector<std::string>& types, const char* value) {
+  if (types.empty()) return true;
+  return std::find(types.begin(), types.end(), value) != types.end();
 }
 
 }  // namespace
@@ -241,11 +844,15 @@ void DcsZebraPlugin::RegisterWithRegistrar(
 DcsZebraPlugin::DcsZebraPlugin() {}
 
 DcsZebraPlugin::~DcsZebraPlugin() {
-  std::lock_guard<std::mutex> lock(g_socket_mutex);
+  std::lock_guard<std::mutex> lock(g_io_mutex);
   for (auto& entry : g_sockets) {
     closesocket(entry.second);
   }
   g_sockets.clear();
+  for (auto& entry : g_serial_handles) {
+    CloseHandle(entry.second);
+  }
+  g_serial_handles.clear();
 }
 
 void DcsZebraPlugin::HandleMethodCall(
@@ -258,13 +865,15 @@ void DcsZebraPlugin::HandleMethodCall(
     map[EncodableValue("tcp")] = EncodableValue(true);
     map[EncodableValue("bluetooth")] = EncodableValue(true);
     map[EncodableValue("bluetoothLe")] = EncodableValue(false);
-    map[EncodableValue("usb")] = EncodableValue(false);
+    map[EncodableValue("usb")] = EncodableValue(true);
+    map[EncodableValue("serial")] = EncodableValue(true);
     result->Success(EncodableValue(map));
     return;
   }
 
   if (method == "discover") {
     EncodableList found;
+    std::set<std::string> seen_ids;
     const auto* args = std::get_if<EncodableMap>(method_call.arguments());
     std::vector<std::string> types;
     if (args != nullptr) {
@@ -279,14 +888,29 @@ void DcsZebraPlugin::HandleMethodCall(
         }
       }
     }
-    if (types.empty() ||
-        std::find(types.begin(), types.end(), "bluetooth") != types.end()) {
-      auto bt = DiscoverBluetooth();
-      found.insert(found.end(), bt.begin(), bt.end());
+    auto appendUnique = [&](EncodableList items) {
+      for (const auto& item : items) {
+        const auto* map = std::get_if<EncodableMap>(&item);
+        if (map == nullptr) continue;
+        auto idIt = map->find(EncodableValue("id"));
+        std::string id;
+        if (idIt != map->end()) {
+          if (const auto* s = std::get_if<std::string>(&idIt->second)) {
+            id = *s;
+          }
+        }
+        if (!id.empty() && !seen_ids.insert(id).second) continue;
+        found.push_back(item);
+      }
+    };
+    if (Wants(types, "bluetooth")) {
+      appendUnique(DiscoverBluetooth());
     }
-    if (std::find(types.begin(), types.end(), "usb") != types.end()) {
-      auto usb = DiscoverUsb();
-      found.insert(found.end(), usb.begin(), usb.end());
+    if (Wants(types, "serial") || Wants(types, "usb")) {
+      appendUnique(DiscoverComPorts());
+    }
+    if (Wants(types, "usb")) {
+      appendUnique(DiscoverUsb());
     }
     result->Success(EncodableValue(found));
     return;
@@ -315,14 +939,21 @@ void DcsZebraPlugin::HandleMethodCall(
       result->Error("bad_args", "id/address required");
       return;
     }
-    if (type != "bluetooth") {
+
+    std::string error;
+    if (type == "bluetooth") {
+      error = ConnectBluetooth(*id, *address);
+    } else if (type == "serial") {
+      error = ConnectSerial(*id, *address);
+    } else if (type == "usb") {
+      error = ConnectUsb(*id, *address);
+    } else {
       result->Error(
           "unsupported",
-          "Windows native plugin currently supports Bluetooth Classic RFCOMM. "
-          "Use Dart TCP for network printers.");
+          "Windows native plugin supports Bluetooth RFCOMM, COM/serial, and "
+          "USB printers (usbprint). Use Dart TCP for network printers.");
       return;
     }
-    const std::string error = ConnectBluetooth(*id, *address);
     if (!error.empty()) {
       result->Error("connect_failed", error);
       return;
@@ -337,8 +968,8 @@ void DcsZebraPlugin::HandleMethodCall(
       auto idIt = args->find(EncodableValue("id"));
       if (idIt != args->end()) {
         if (const auto* id = std::get_if<std::string>(&idIt->second)) {
-          std::lock_guard<std::mutex> lock(g_socket_mutex);
-          CloseSocketLocked(*id);
+          std::lock_guard<std::mutex> lock(g_io_mutex);
+          CloseAnyLocked(*id);
         }
       }
     }
@@ -401,7 +1032,7 @@ void DcsZebraPlugin::HandleMethodCall(
   }
 
   if (method == "getStatus") {
-    // Host status over RFCOMM is handled by Dart ~HS after connect.
+    // Host status over RFCOMM/serial is handled by Dart ~HS after connect.
     result->Success();
     return;
   }

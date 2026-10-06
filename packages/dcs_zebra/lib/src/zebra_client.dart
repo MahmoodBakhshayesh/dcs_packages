@@ -58,15 +58,19 @@ class ZebraClient {
     return MethodChannelZebraTransport.platformCapabilities();
   }
 
-  /// Discover printers via native SDK where available.
+  /// Discover printers via native SDK / platform discovery where available.
   ///
-  /// Results are filtered to Zebra-like printers only.
+  /// When a device reports [ZebraPrinterDescriptor.manufacturer], only
+  /// ZDesigner / Zebra entries are kept. Devices without manufacturer still
+  /// use name/VID heuristics (so Bluetooth custom names are not blocked solely
+  /// by missing manufacturer).
   Future<List<ZebraPrinterDescriptor>> discover({
     List<ZebraConnectionType> types = const [
       ZebraConnectionType.tcp,
       ZebraConnectionType.bluetooth,
       ZebraConnectionType.bluetoothLe,
       ZebraConnectionType.usb,
+      ZebraConnectionType.serial,
     ],
     Duration timeout = const Duration(seconds: 8),
     bool zebraOnly = true,
@@ -85,8 +89,8 @@ class ZebraClient {
     logger.call(
       ZebraLogLevel.info,
       ZebraLogScope.client,
-      'Discovery returned ${raw.length} device(s), '
-      '${filtered.length} Zebra candidate(s)',
+      'Discovery returned ${raw.length} device(s)'
+      '${zebraOnly ? ', ${filtered.length} Zebra/ZDesigner candidate(s)' : ''}',
     );
     return filtered;
   }

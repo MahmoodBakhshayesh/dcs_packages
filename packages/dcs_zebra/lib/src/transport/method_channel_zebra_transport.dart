@@ -138,6 +138,7 @@ class MethodChannelZebraTransport implements ZebraTransport {
               macAddress: map['macAddress'] as String?,
               serialNumber: map['serialNumber'] as String?,
               model: map['model'] as String?,
+              manufacturer: map['manufacturer'] as String?,
             );
           })
           .toList(growable: false);
@@ -190,6 +191,7 @@ class MethodChannelZebraTransport implements ZebraTransport {
           'bluetooth': false,
           'bluetoothLe': false,
           'usb': false,
+          'serial': false,
         };
       }
       return {
@@ -197,6 +199,7 @@ class MethodChannelZebraTransport implements ZebraTransport {
         'bluetooth': result['bluetooth'] == true,
         'bluetoothLe': result['bluetoothLe'] == true,
         'usb': result['usb'] == true,
+        'serial': result['serial'] == true,
       };
     } on MissingPluginException {
       return const {
@@ -204,6 +207,7 @@ class MethodChannelZebraTransport implements ZebraTransport {
         'bluetooth': false,
         'bluetoothLe': false,
         'usb': false,
+        'serial': false,
       };
     }
   }
