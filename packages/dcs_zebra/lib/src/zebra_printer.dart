@@ -33,6 +33,7 @@ class ZebraPrinter {
   final ZebraConnectionOptions _options;
   ZebraTransport? _transport;
   ZebraPrinterStatus _status;
+  _ZebraBatchRun? _batchRun;
 
   String get id => descriptor.id;
 
@@ -41,6 +42,10 @@ class ZebraPrinter {
   ZebraPrinterStatus get status => _status;
 
   bool get isConnected => _transport?.isConnected == true;
+
+  /// Failed jobs from the most recent [printBatch] (for [retryFailedJobs]).
+  List<ZebraJob> get lastFailedJobs =>
+      List.unmodifiable(_batchRun?.failed ?? const []);
 
   Future<void> connect({Duration? timeout}) async {
     _setStatus(
@@ -333,6 +338,266 @@ class ZebraPrinter {
     return false;
   }
 
+  /// Media calibration (`~JC`).
+  Future<ZebraCommandResult> calibrate({Duration? timeout}) {
+    return _sendRawCommand(
+      '~JC',
+      timeout: timeout,
+      okMessage: 'Calibrate sent.',
+      failResult: 'calibrateFailed',
+    );
+  }
+
+  /// Print configuration / settings label (`~WC`).
+  Future<ZebraCommandResult> printConfigurationLabel({Duration? timeout}) {
+    return _sendRawCommand(
+      '~WC',
+      timeout: timeout,
+      okMessage: 'Configuration label sent.',
+      failResult: 'configLabelFailed',
+    );
+  }
+
+  /// Small ZPL test label. Optional [text] is rendered on the label.
+  Future<ZebraCommandResult> printTestLabel({
+    String? text,
+    Duration? timeout,
+  }) {
+    final body = (text == null || text.trim().isEmpty)
+        ? 'dcs_zebra test'
+        : text.trim();
+    final escaped = body.replaceAll('^', ' ').replaceAll('~', ' ');
+    final zpl = '^XA\n'
+        '^FO30,30^A0N,40,40^FD$escaped^FS\n'
+        '^FO30,90^A0N,28,28^FD${descriptor.displayName}^FS\n'
+        '^XZ';
+    return printZpl(zpl, timeout: timeout);
+  }
+
+  /// SGD `print.tone` (darkness). Typical range depends on model (−30…30 or 0…30).
+  Future<ZebraCommandResult> setDarkness(int value, {Duration? timeout}) {
+    return sgdSet('print.tone', '$value', timeout: timeout);
+  }
+
+  Future<int?> getDarkness({Duration? timeout}) async {
+    final raw = await sgdGet('print.tone', timeout: timeout);
+    return _parseSgdInt(raw);
+  }
+
+  /// SGD `media.speed`.
+  Future<ZebraCommandResult> setSpeed(int value, {Duration? timeout}) {
+    return sgdSet('media.speed', '$value', timeout: timeout);
+  }
+
+  Future<int?> getSpeed({Duration? timeout}) async {
+    final raw = await sgdGet('media.speed', timeout: timeout);
+    return _parseSgdInt(raw);
+  }
+
+  /// SGD `power.percent_full`. Returns null on desktop models / empty replies.
+  Future<int?> batteryPercent({Duration? timeout}) async {
+    final raw = await sgdGet('power.percent_full', timeout: timeout);
+    return _parseSgdInt(raw);
+  }
+
+  /// Prints [jobs] sequentially, yielding per-job [ZebraJobProgress].
+  ///
+  /// Cancel via [cancelBatch] or by cancelling the stream subscription.
+  /// Failed jobs are retained for [retryFailedJobs].
+  Stream<ZebraJobProgress> printBatch(
+    List<ZebraJob> jobs, {
+    bool waitForReady = true,
+    int maxRetries = 0,
+  }) {
+    final run = _ZebraBatchRun(jobs: List<ZebraJob>.from(jobs));
+    _batchRun = run;
+
+    late StreamController<ZebraJobProgress> controller;
+    controller = StreamController<ZebraJobProgress>(
+      onListen: () {
+        unawaited(_runBatch(
+          run: run,
+          waitForReady: waitForReady,
+          maxRetries: maxRetries,
+          controller: controller,
+        ));
+      },
+      onCancel: () {
+        run.cancelled = true;
+      },
+    );
+    return controller.stream;
+  }
+
+  /// Cancels an in-flight [printBatch].
+  void cancelBatch() {
+    _batchRun?.cancelled = true;
+  }
+
+  /// Re-runs jobs that failed in the last [printBatch].
+  Stream<ZebraJobProgress> retryFailedJobs({
+    bool waitForReady = true,
+    int maxRetries = 0,
+  }) {
+    final failed = lastFailedJobs;
+    return printBatch(
+      failed,
+      waitForReady: waitForReady,
+      maxRetries: maxRetries,
+    );
+  }
+
+  Future<void> _runBatch({
+    required _ZebraBatchRun run,
+    required bool waitForReady,
+    required int maxRetries,
+    required StreamController<ZebraJobProgress> controller,
+  }) async {
+    final total = run.jobs.length;
+    run.failed.clear();
+
+    for (var i = 0; i < run.jobs.length; i++) {
+      if (run.cancelled || controller.isClosed) break;
+      final job = run.jobs[i];
+      controller.add(
+        ZebraJobProgress(
+          jobId: job.id,
+          state: ZebraJobState.queued,
+          index: i,
+          total: total,
+        ),
+      );
+
+      if (run.cancelled) break;
+
+      var attempt = 0;
+      var succeeded = false;
+      String? lastError;
+
+      while (attempt <= maxRetries && !run.cancelled) {
+        attempt++;
+        controller.add(
+          ZebraJobProgress(
+            jobId: job.id,
+            state: ZebraJobState.sending,
+            index: i,
+            total: total,
+          ),
+        );
+
+        if (waitForReady) {
+          final ready = await this.waitForReady(
+            timeout: _options.statusTimeout + const Duration(seconds: 25),
+          );
+          if (!ready && !run.cancelled) {
+            lastError = 'Printer not ready';
+            if (attempt <= maxRetries) continue;
+            break;
+          }
+        }
+
+        if (run.cancelled) break;
+
+        final result = await printRaw(
+          job.data,
+          language: job.language,
+        );
+        if (result.ok) {
+          succeeded = true;
+          controller.add(
+            ZebraJobProgress(
+              jobId: job.id,
+              state: ZebraJobState.done,
+              index: i,
+              total: total,
+            ),
+          );
+          break;
+        }
+        lastError = result.message ?? result.result;
+        if (attempt <= maxRetries) {
+          await Future<void>.delayed(const Duration(milliseconds: 300));
+        }
+      }
+
+      if (!succeeded && !run.cancelled) {
+        run.failed.add(job);
+        controller.add(
+          ZebraJobProgress(
+            jobId: job.id,
+            state: ZebraJobState.failed,
+            index: i,
+            total: total,
+            error: lastError ?? 'Print failed',
+          ),
+        );
+      }
+    }
+
+    if (!controller.isClosed) await controller.close();
+  }
+
+  Future<ZebraCommandResult> _sendRawCommand(
+    String command, {
+    Duration? timeout,
+    required String okMessage,
+    required String failResult,
+  }) async {
+    final transport = _requireTransport();
+    final payload = command.endsWith('\n') ? command : '$command\n';
+    try {
+      await transport.write(
+        Uint8List.fromList(utf8.encode(payload)),
+        timeout: timeout ?? _options.writeTimeout,
+      );
+      _logger.call(
+        ZebraLogLevel.info,
+        ZebraLogScope.device,
+        'Command sent: ${command.trim()}',
+        printerId: id,
+        direction: ZebraMessageDirection.outbound,
+        payload: command.trim(),
+      );
+      return ZebraCommandResult(
+        ok: true,
+        result: 'ok',
+        message: okMessage,
+      );
+    } catch (error, stack) {
+      _logger.call(
+        ZebraLogLevel.error,
+        ZebraLogScope.device,
+        'Command failed: ${command.trim()}',
+        printerId: id,
+        error: error,
+        stackTrace: stack,
+      );
+      return ZebraCommandResult(
+        ok: false,
+        result: failResult,
+        message: error.toString(),
+      );
+    }
+  }
+
+  static int? _parseSgdInt(String? raw) {
+    if (raw == null) return null;
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    // SGD replies may be quoted: "75" or bare 75 / 75\r\n
+    final unquoted = trimmed
+        .replaceAll('"', '')
+        .replaceAll("'", '')
+        .trim();
+    if (unquoted.isEmpty ||
+        unquoted.toLowerCase() == 'null' ||
+        unquoted == '?' ||
+        unquoted.toLowerCase() == 'n/a') {
+      return null;
+    }
+    return int.tryParse(unquoted.split(RegExp(r'\s+')).first);
+  }
+
   ZebraTransport _createTransport() {
     switch (descriptor.connectionType) {
       case ZebraConnectionType.tcp:
@@ -373,4 +638,12 @@ class ZebraPrinter {
     _status = status;
     _onStatus(status);
   }
+}
+
+class _ZebraBatchRun {
+  _ZebraBatchRun({required this.jobs});
+
+  final List<ZebraJob> jobs;
+  final failed = <ZebraJob>[];
+  var cancelled = false;
 }
