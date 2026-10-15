@@ -367,6 +367,41 @@ void main() {
     await session.close();
   });
 
+  test('postWriteHold blocks next queued command', () async {
+    final writes = <DateTime>[];
+    final session = _FakeSession(
+      onWrite: (bytes, data) {
+        writes.add(DateTime.now());
+      },
+    );
+    final queue = DcsDeviceRequestQueue(session);
+
+    final first = queue.sendText(
+      'CP#1',
+      options: const DcsDeviceRequestOptions(
+        protocolMode: DcsProtocolMode.auto,
+        waitForResponse: false,
+        postWriteHold: Duration(milliseconds: 120),
+      ),
+    );
+    final second = queue.sendText(
+      'CP#2',
+      options: const DcsDeviceRequestOptions(
+        protocolMode: DcsProtocolMode.auto,
+        waitForResponse: false,
+      ),
+    );
+
+    await Future.wait([first, second]);
+    expect(writes, hasLength(2));
+    expect(
+      writes[1].difference(writes[0]).inMilliseconds,
+      greaterThanOrEqualTo(100),
+    );
+
+    await session.close();
+  });
+
   test('OCR aliases parse to passport OCR role', () {
     expect(DcsDeviceRole.tryParse('ocr'), DcsDeviceRole.opticalCardReader);
     expect(DcsDeviceRole.opticalCardReader.isPassportReader, isTrue);

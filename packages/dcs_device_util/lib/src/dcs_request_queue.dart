@@ -10,8 +10,7 @@ import 'dcs_models.dart';
 /// Classified outcome for a request/response device command.
 enum DcsDeviceResponseStatus { ok, error, unknown, timeout }
 
-typedef DcsResponseClassifier =
-    DcsDeviceResponseStatus Function(Uint8List bytes, String text);
+typedef DcsResponseClassifier = DcsDeviceResponseStatus Function(Uint8List bytes, String text);
 
 /// Options for one queued request.
 class DcsDeviceRequestOptions {
@@ -22,6 +21,7 @@ class DcsDeviceRequestOptions {
     this.framed = false,
     this.protocolMode,
     this.waitForResponse = true,
+    this.postWriteHold = Duration.zero,
     this.classifier = defaultClassifier,
   });
 
@@ -46,6 +46,11 @@ class DcsDeviceRequestOptions {
   /// wait for an AEA ack (ATB CP# often never replies).
   final bool waitForResponse;
 
+  /// Optional extra hold after write/response before releasing the per-device
+  /// queue. Prefer waiting for a real OK/error (`waitForResponse: true`) —
+  /// use this only when a device never replies.
+  final Duration postWriteHold;
+
   final DcsResponseClassifier classifier;
 
   DcsProtocolMode get resolvedProtocolMode {
@@ -53,10 +58,7 @@ class DcsDeviceRequestOptions {
     return framed ? DcsProtocolMode.framed : DcsProtocolMode.none;
   }
 
-  static DcsDeviceResponseStatus defaultClassifier(
-    Uint8List bytes,
-    String text,
-  ) {
+  static DcsDeviceResponseStatus defaultClassifier(Uint8List bytes, String text) {
     if (bytes.isEmpty) return DcsDeviceResponseStatus.timeout;
 
     final normalized = text.toUpperCase();
@@ -80,8 +82,7 @@ class DcsDeviceRequestOptions {
   /// True for busy / in-progress device replies (safe to retry).
   static bool isBusyError(String text) {
     final n = text.toUpperCase();
-    return n.contains('HDCERR7') ||
-        RegExp(r'(^|[^A-Z0-9])ERR7([^A-Z]|$)').hasMatch(n);
+    return n.contains('HDCERR7') || RegExp(r'(^|[^A-Z0-9])ERR7([^A-Z]|$)').hasMatch(n);
   }
 
   static bool _hasHardAeaError(String normalized) {
@@ -101,12 +102,7 @@ class DcsDeviceRequestOptions {
 
 /// Rich result returned by a queued command.
 class DcsDeviceResponse {
-  const DcsDeviceResponse({
-    required this.status,
-    required this.bytes,
-    required this.text,
-    required this.timedOut,
-  });
+  const DcsDeviceResponse({required this.status, required this.bytes, required this.text, required this.timedOut});
 
   final DcsDeviceResponseStatus status;
   final Uint8List bytes;
@@ -118,30 +114,19 @@ class DcsDeviceResponse {
 
 /// Serializes request/response traffic for devices that answer one command at a time.
 class DcsDeviceRequestQueue {
-  DcsDeviceRequestQueue(
-    this._session, {
-    DcsDeviceRequestOptions defaultOptions = const DcsDeviceRequestOptions(),
-  }) : _defaultOptions = defaultOptions;
+  DcsDeviceRequestQueue(this._session, {DcsDeviceRequestOptions defaultOptions = const DcsDeviceRequestOptions()})
+    : _defaultOptions = defaultOptions;
 
   final DcsDeviceSession _session;
   final DcsDeviceRequestOptions _defaultOptions;
   Future<void> _tail = Future<void>.value();
 
-  Future<DcsDeviceResponse> sendText(
-    String command, {
-    DcsDeviceRequestOptions? options,
-  }) {
+  Future<DcsDeviceResponse> sendText(String command, {DcsDeviceRequestOptions? options}) {
     final requestOptions = options ?? _defaultOptions;
-    return sendBytes(
-      requestOptions.encoding.encode(command),
-      options: requestOptions,
-    );
+    return sendBytes(requestOptions.encoding.encode(command), options: requestOptions);
   }
 
-  Future<DcsDeviceResponse> sendBytes(
-    List<int> command, {
-    DcsDeviceRequestOptions? options,
-  }) {
+  Future<DcsDeviceResponse> sendBytes(List<int> command, {DcsDeviceRequestOptions? options}) {
     final completer = Completer<DcsDeviceResponse>();
     final requestOptions = options ?? _defaultOptions;
 
@@ -158,39 +143,30 @@ class DcsDeviceRequestQueue {
     return completer.future;
   }
 
-  Future<DcsDeviceResponse> _execute(
-    List<int> command,
-    DcsDeviceRequestOptions options,
-  ) async {
+  Future<DcsDeviceResponse> _execute(List<int> command, DcsDeviceRequestOptions options) async {
     final wire = _encodeOutbound(command, options.resolvedProtocolMode);
+    late final DcsDeviceResponse response;
     if (!options.waitForResponse) {
       await _session.write(wire);
-      return DcsDeviceResponse(
-        status: DcsDeviceResponseStatus.ok,
-        bytes: Uint8List(0),
-        text: '',
-        timedOut: false,
-      );
-    }
-    final bytes = await _captureResponse(wire, options);
-    final responseBytes = Uint8List.fromList(bytes ?? const []);
-    final text = _decode(options.encoding, responseBytes);
-    final status = bytes == null
-        ? DcsDeviceResponseStatus.timeout
-        : options.classifier(responseBytes, text);
+      response = DcsDeviceResponse(status: DcsDeviceResponseStatus.ok, bytes: Uint8List(0), text: '', timedOut: false);
+    } else {
+      final bytes = await _captureResponse(wire, options);
+      final responseBytes = Uint8List.fromList(bytes ?? const []);
+      final text = _decode(options.encoding, responseBytes);
+      final status = bytes == null ? DcsDeviceResponseStatus.timeout : options.classifier(responseBytes, text);
 
-    return DcsDeviceResponse(
-      status: status,
-      bytes: responseBytes,
-      text: text,
-      timedOut: bytes == null,
-    );
+      response = DcsDeviceResponse(status: status, bytes: responseBytes, text: text, timedOut: bytes == null);
+    }
+
+    // Hold the per-device queue so the next CP#/command cannot race the ATB.
+    final hold = options.postWriteHold;
+    if (hold > Duration.zero) {
+      await Future<void>.delayed(hold);
+    }
+    return response;
   }
 
-  Future<List<int>?> _captureResponse(
-    List<int> command,
-    DcsDeviceRequestOptions options,
-  ) async {
+  Future<List<int>?> _captureResponse(List<int> command, DcsDeviceRequestOptions options) async {
     final completer = Completer<List<int>?>();
     final buffer = <int>[];
     final frameParser = _DcsFrameParser(keepPreStx: true);
@@ -208,10 +184,7 @@ class DcsDeviceRequestQueue {
 
     void markRawData() {
       quietTimer?.cancel();
-      quietTimer = Timer(
-        options.quietWindow,
-        () => complete(List<int>.of(buffer)),
-      );
+      quietTimer = Timer(options.quietWindow, () => complete(List<int>.of(buffer)));
     }
 
     subscription = _session.data.listen((chunk) {

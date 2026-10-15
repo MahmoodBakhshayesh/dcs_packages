@@ -1,3 +1,8 @@
+## 0.2.10
+
+* `DcsDeviceRequestOptions.postWriteHold` — optional hold after write/response before
+  releasing the per-device queue (prefer waiting for real OK/error when the device replies).
+
 ## 0.2.9
 
 * Per-device request queue supports `waitForResponse: false` (framed write still serialized on that COM).
