@@ -377,6 +377,8 @@ EncodableList DiscoverBluetooth() {
     map[EncodableValue("address")] = EncodableValue(address);
     map[EncodableValue("connectionType")] = EncodableValue("bluetooth");
     map[EncodableValue("name")] = EncodableValue(name);
+    map[EncodableValue("paired")] =
+        EncodableValue(info.fAuthenticated || info.fRemembered);
     found.push_back(EncodableValue(map));
   } while (BluetoothFindNextDevice(find, &info));
 
@@ -868,6 +870,43 @@ void DcsZebraPlugin::HandleMethodCall(
     map[EncodableValue("usb")] = EncodableValue(true);
     map[EncodableValue("serial")] = EncodableValue(true);
     result->Success(EncodableValue(map));
+    return;
+  }
+
+  if (method == "startDiscover") {
+    // No EventChannel on Windows yet — Dart falls back to one-shot discover.
+    result->NotImplemented();
+    return;
+  }
+
+  if (method == "cancelDiscover") {
+    result->Success();
+    return;
+  }
+
+  if (method == "pair" || method == "unpair") {
+    result->Success(EncodableValue("unsupported"));
+    return;
+  }
+
+  if (method == "bondedPrinters" || method == "pairedAccessories") {
+    EncodableList bonded;
+    for (const auto& item : DiscoverBluetooth()) {
+      const auto* map = std::get_if<EncodableMap>(&item);
+      if (map == nullptr) continue;
+      auto pairedIt = map->find(EncodableValue("paired"));
+      bool paired = false;
+      if (pairedIt != map->end()) {
+        if (const auto* b = std::get_if<bool>(&pairedIt->second)) paired = *b;
+      }
+      if (paired) bonded.push_back(item);
+    }
+    result->Success(EncodableValue(bonded));
+    return;
+  }
+
+  if (method == "ensureBluetoothPermissions") {
+    result->Success(EncodableValue("granted"));
     return;
   }
 

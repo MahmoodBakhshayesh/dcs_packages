@@ -49,7 +49,40 @@ class ZebraPrinterDescriptor {
     this.serialNumber,
     this.model,
     this.manufacturer,
+    this.rssi,
+    this.paired = false,
   });
+
+  factory ZebraPrinterDescriptor.fromMap(Map<Object?, Object?> map) {
+    final typeName = (map['connectionType'] as String?) ?? 'tcp';
+    final type = ZebraConnectionType.values.firstWhere(
+      (value) => value.name == typeName,
+      orElse: () => ZebraConnectionType.tcp,
+    );
+    final address = (map['address'] as String?) ?? '';
+    final id = (map['id'] as String?) ?? '${type.name}:$address';
+    final rssiValue = map['rssi'];
+    int? rssi;
+    if (rssiValue is int) {
+      rssi = rssiValue;
+    } else if (rssiValue is num) {
+      rssi = rssiValue.toInt();
+    } else if (rssiValue is String) {
+      rssi = int.tryParse(rssiValue);
+    }
+    return ZebraPrinterDescriptor(
+      id: id,
+      address: address,
+      connectionType: type,
+      name: (map['name'] as String?) ?? '',
+      macAddress: map['macAddress'] as String?,
+      serialNumber: map['serialNumber'] as String?,
+      model: map['model'] as String?,
+      manufacturer: map['manufacturer'] as String?,
+      rssi: rssi,
+      paired: map['paired'] == true,
+    );
+  }
 
   final String id;
   final String address;
@@ -62,6 +95,22 @@ class ZebraPrinterDescriptor {
 
   /// Windows SetupAPI / driver manufacturer (Zebra USB often reports `ZDesigner`).
   final String? manufacturer;
+
+  /// Signal strength from BLE / Classic discovery when the platform provides it.
+  final int? rssi;
+
+  /// Whether the device is already bonded / paired with the host.
+  final bool paired;
+
+  /// Mobile Link-OS models: name/model prefix `ZQ`, `iMZ`, or `ZR`.
+  bool get isMobileModel {
+    final source = (model?.trim().isNotEmpty == true ? model! : name).trim();
+    if (source.isEmpty) return false;
+    final upper = source.toUpperCase();
+    return upper.startsWith('ZQ') ||
+        upper.startsWith('IMZ') ||
+        upper.startsWith('ZR');
+  }
 
   String get displayName =>
       name.trim().isNotEmpty ? name : '$connectionType:$address';
@@ -76,6 +125,9 @@ class ZebraPrinterDescriptor {
     String? serialNumber,
     String? model,
     String? manufacturer,
+    int? rssi,
+    bool? paired,
+    bool clearRssi = false,
   }) {
     return ZebraPrinterDescriptor(
       id: id ?? this.id,
@@ -87,8 +139,65 @@ class ZebraPrinterDescriptor {
       serialNumber: serialNumber ?? this.serialNumber,
       model: model ?? this.model,
       manufacturer: manufacturer ?? this.manufacturer,
+      rssi: clearRssi ? null : rssi ?? this.rssi,
+      paired: paired ?? this.paired,
     );
   }
+}
+
+/// Outcome of a Bluetooth pair / unpair request.
+enum ZebraPairingResult {
+  paired,
+  unpaired,
+  alreadyPaired,
+  failed,
+  /// iOS cannot initiate pairing in-app; open Settings / Bluetooth.
+  openSystemSettings,
+  unsupported,
+}
+
+/// Runtime Bluetooth permission state after [ZebraClient.ensureBluetoothPermissions].
+enum ZebraPermissionState {
+  granted,
+  denied,
+  permanentlyDenied,
+  restricted,
+  unsupported,
+}
+
+/// One print job in a [ZebraPrinter.printBatch] sequence.
+class ZebraJob {
+  const ZebraJob({
+    required this.id,
+    required this.data,
+    this.language = ZebraPrinterLanguage.zpl,
+  });
+
+  final String id;
+  final String data;
+  final ZebraPrinterLanguage language;
+}
+
+enum ZebraJobState { queued, sending, done, failed }
+
+/// Per-job progress event from [ZebraPrinter.printBatch].
+class ZebraJobProgress {
+  const ZebraJobProgress({
+    required this.jobId,
+    required this.state,
+    required this.index,
+    required this.total,
+    this.error,
+  });
+
+  final String jobId;
+  final ZebraJobState state;
+  final int index;
+  final int total;
+  final String? error;
+
+  bool get isTerminal =>
+      state == ZebraJobState.done || state == ZebraJobState.failed;
 }
 
 class ZebraPrinterStatus {

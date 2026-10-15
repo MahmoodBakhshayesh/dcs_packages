@@ -95,6 +95,61 @@ class ZebraClient {
     return filtered;
   }
 
+  /// Streams discovery results as they arrive (BLE / Classic / network).
+  ///
+  /// Cancelling the subscription stops native discovery when supported.
+  Stream<ZebraPrinterDescriptor> discoverStream({
+    List<ZebraConnectionType> types = const [
+      ZebraConnectionType.tcp,
+      ZebraConnectionType.bluetooth,
+      ZebraConnectionType.bluetoothLe,
+      ZebraConnectionType.usb,
+      ZebraConnectionType.serial,
+    ],
+    Duration timeout = const Duration(seconds: 8),
+    bool zebraOnly = true,
+  }) {
+    logger.call(
+      ZebraLogLevel.info,
+      ZebraLogScope.client,
+      'Streaming discovery: ${types.map((t) => t.name).join(", ")}',
+    );
+    final raw = MethodChannelZebraTransport.discoverStream(
+      types: types,
+      timeout: timeout,
+      logger: logger,
+    );
+    if (!zebraOnly) return raw;
+    return raw.where(ZebraPrinterIdentity.looksLikeZebra);
+  }
+
+  /// Android: create a Bluetooth bond. iOS: returns
+  /// [ZebraPairingResult.openSystemSettings] (pair in Settings).
+  Future<ZebraPairingResult> pair(ZebraPrinterDescriptor descriptor) {
+    return MethodChannelZebraTransport.pair(descriptor);
+  }
+
+  /// Android: remove a Bluetooth bond. iOS: [ZebraPairingResult.openSystemSettings].
+  Future<ZebraPairingResult> unpair(ZebraPrinterDescriptor descriptor) {
+    return MethodChannelZebraTransport.unpair(descriptor);
+  }
+
+  /// Android bonded Bluetooth devices (and Windows remembered devices).
+  Future<List<ZebraPrinterDescriptor>> bondedPrinters() {
+    return MethodChannelZebraTransport.bondedPrinters();
+  }
+
+  /// iOS MFi accessories from [EAAccessoryManager] (also works as bonded list
+  /// on Android).
+  Future<List<ZebraPrinterDescriptor>> pairedAccessories() {
+    return MethodChannelZebraTransport.pairedAccessories();
+  }
+
+  /// Requests Bluetooth SCAN/CONNECT (Android 12+) or legacy location permission.
+  Future<ZebraPermissionState> ensureBluetoothPermissions() {
+    return MethodChannelZebraTransport.ensureBluetoothPermissions();
+  }
+
   /// Register a known TCP / BT / USB printer without connecting yet.
   ZebraPrinter register(ZebraPrinterDescriptor descriptor) {
     final existing = _printers[descriptor.id];

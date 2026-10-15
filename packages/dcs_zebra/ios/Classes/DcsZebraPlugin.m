@@ -1,5 +1,6 @@
 #import "DcsZebraPlugin.h"
 #import <ExternalAccessory/ExternalAccessory.h>
+#import <UIKit/UIKit.h>
 
 #import "TcpPrinterConnection.h"
 #import "MfiBtPrinterConnection.h"
@@ -7,8 +8,10 @@
 #import "ZebraPrinter.h"
 #import "PrinterStatus.h"
 
-@interface DcsZebraPlugin ()
+@interface DcsZebraPlugin () <FlutterStreamHandler>
 @property(nonatomic, strong) NSMutableDictionary<NSString *, id> *connections;
+@property(nonatomic, copy) FlutterEventSink discoverSink;
+@property(nonatomic, assign) BOOL discoverCancelled;
 @end
 
 @implementation DcsZebraPlugin
@@ -17,9 +20,24 @@
   FlutterMethodChannel *channel =
       [FlutterMethodChannel methodChannelWithName:@"dcs_zebra"
                                   binaryMessenger:[registrar messenger]];
+  FlutterEventChannel *discoverChannel =
+      [FlutterEventChannel eventChannelWithName:@"dcs_zebra/discover"
+                                binaryMessenger:[registrar messenger]];
   DcsZebraPlugin *instance = [[DcsZebraPlugin alloc] init];
   instance.connections = [NSMutableDictionary dictionary];
   [registrar addMethodCallDelegate:instance channel:channel];
+  [discoverChannel setStreamHandler:instance];
+}
+
+- (FlutterError *)onListenWithArguments:(id)arguments eventSink:(FlutterEventSink)events {
+  self.discoverSink = events;
+  return nil;
+}
+
+- (FlutterError *)onCancelWithArguments:(id)arguments {
+  self.discoverCancelled = YES;
+  self.discoverSink = nil;
+  return nil;
 }
 
 - (void)handleMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result {
@@ -35,9 +53,51 @@
 
   if ([call.method isEqualToString:@"discover"]) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-      NSArray *found = [self discoverPrinters];
+      NSArray *found = [self discoverPrintersStreaming:NO];
       dispatch_async(dispatch_get_main_queue(), ^{ result(found); });
     });
+    return;
+  }
+
+  if ([call.method isEqualToString:@"startDiscover"]) {
+    self.discoverCancelled = NO;
+    result(nil);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      [self discoverPrintersStreaming:YES];
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.discoverSink != nil) {
+          self.discoverSink(@{@"done" : @YES});
+        }
+      });
+    });
+    return;
+  }
+
+  if ([call.method isEqualToString:@"cancelDiscover"]) {
+    self.discoverCancelled = YES;
+    result(nil);
+    return;
+  }
+
+  if ([call.method isEqualToString:@"pair"] || [call.method isEqualToString:@"unpair"]) {
+    // MFi pairing is performed in iOS Settings.
+    result(@"openSystemSettings");
+    return;
+  }
+
+  if ([call.method isEqualToString:@"pairedAccessories"] ||
+      [call.method isEqualToString:@"bondedPrinters"]) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      NSArray *found = [self discoverPrintersStreaming:NO];
+      dispatch_async(dispatch_get_main_queue(), ^{ result(found); });
+    });
+    return;
+  }
+
+  if ([call.method isEqualToString:@"ensureBluetoothPermissions"]) {
+    // Accessory / Bluetooth usage is gated by Info.plist strings; there is no
+    // runtime BT permission prompt equivalent to Android 12+.
+    result(@"granted");
     return;
   }
 
@@ -125,20 +185,30 @@
   result(FlutterMethodNotImplemented);
 }
 
-- (NSArray *)discoverPrinters {
+- (NSArray *)discoverPrintersStreaming:(BOOL)stream {
   NSMutableArray *found = [NSMutableArray array];
-  NSArray<EAAccessory *> *accessories = [EAAccessoryManager sharedAccessoryManager].connectedAccessories;
+  NSArray<EAAccessory *> *accessories =
+      [EAAccessoryManager sharedAccessoryManager].connectedAccessories;
   for (EAAccessory *accessory in accessories) {
-    // Include all connected MFi accessories — Zebra printers may use custom names.
-    NSString *address = accessory.serialNumber.length > 0 ? accessory.serialNumber : accessory.name;
-    [found addObject:@{
+    if (self.discoverCancelled) break;
+    NSString *address =
+        accessory.serialNumber.length > 0 ? accessory.serialNumber : accessory.name;
+    NSDictionary *map = @{
       @"id" : [NSString stringWithFormat:@"bluetooth:%@", address],
-      @"address" : address,
+      @"address" : address ?: @"",
       @"connectionType" : @"bluetooth",
-      @"name" : accessory.name ?: address,
+      @"name" : accessory.name ?: address ?: @"",
       @"serialNumber" : accessory.serialNumber ?: [NSNull null],
       @"model" : accessory.modelNumber ?: [NSNull null],
-    }];
+      @"macAddress" : [NSNull null],
+      @"manufacturer" : @"Zebra",
+      @"rssi" : [NSNull null],
+      @"paired" : @YES,
+    };
+    [found addObject:map];
+    if (stream && self.discoverSink != nil) {
+      dispatch_async(dispatch_get_main_queue(), ^{ self.discoverSink(map); });
+    }
   }
   return found;
 }

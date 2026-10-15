@@ -17,8 +17,14 @@ public class DcsZebraPlugin: NSObject, FlutterPlugin {
         "bluetoothLe": false,
         "usb": false,
       ])
-    case "discover":
+    case "discover", "bondedPrinters", "pairedAccessories":
       result([])
+    case "startDiscover", "cancelDiscover":
+      result(nil)
+    case "pair", "unpair":
+      result("unsupported")
+    case "ensureBluetoothPermissions":
+      result("unsupported")
     case "connect", "disconnect", "write", "read", "getStatus":
       result(FlutterError(
         code: "unsupported",
