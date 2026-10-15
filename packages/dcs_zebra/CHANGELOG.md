@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- iOS: cast TCP port substring to `NSString` before `integerValue` (Xcode 16 / modern Clang).
+
 ## 0.2.0
 
 - Discovery: `ZebraPrinterDescriptor` adds `rssi`, `paired`, and `isMobileModel` (ZQ / iMZ / ZR); `ZebraClient.discoverStream` emits results as they arrive.
