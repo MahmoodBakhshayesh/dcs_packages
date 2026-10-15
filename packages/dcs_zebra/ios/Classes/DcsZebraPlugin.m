@@ -224,7 +224,7 @@
   } else {
     NSArray *parts = [address componentsSeparatedByString:@":"];
     NSString *host = parts.firstObject;
-    NSInteger port = parts.count > 1 ? parts[1].integerValue : 9100;
+    NSInteger port = parts.count > 1 ? [(NSString *)parts[1] integerValue] : 9100;
     connection = [[TcpPrinterConnection alloc] initWithAddress:host andWithPort:port];
   }
   if (![connection open]) {
