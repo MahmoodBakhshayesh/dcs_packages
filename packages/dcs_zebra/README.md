@@ -12,7 +12,7 @@ dependencies:
     git:
       url: https://github.com/MahmoodBakhshayesh/dcs_packages.git
       path: packages/dcs_zebra
-      ref: main
+      ref: dcs_zebra-v0.2.0
 ```
 
 ## Capability matrix
@@ -29,10 +29,50 @@ Default TCP ports: **9100** (ZPL), **6101** (CPCL), **9200** (status).
 ## Features
 
 - `ZebraClient` / `ZebraPrinter` lifecycle aligned with CUPPS device usage
+- Discovery with `rssi`, `paired`, `isMobileModel` (ZQ / iMZ / ZR) and `discoverStream`
+- Android Bluetooth pair / unpair / bonded list; iOS paired MFi accessories
+- Printer actions: calibrate (`~JC`), config label (`~WC`), test label, darkness / speed SGD, battery %
+- Batch printing with per-job progress, cancel, and retry of failed jobs
+- `ensureBluetoothPermissions()` for Android 12+ SCAN/CONNECT (legacy location)
 - Status streams, hardware flags (paper out, head open, paused, …)
 - SGD get/set and `~HS` host-status parsing over TCP
 - Structured `ZebraLogger` + JSONL file sink + `DcsStandardLogStore` bridge
 - Status icons for boarding-pass / bag-tag roles (`bp` / `bt`) matching CUPPS visual statuses
+
+## Platform setup
+
+### Android (`AndroidManifest.xml`)
+
+The plugin declares these permissions; ensure the **host app** merge keeps them:
+
+```xml
+<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+<uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+<uses-permission android:name="android.permission.INTERNET" />
+```
+
+Call `await client.ensureBluetoothPermissions()` before discovery on Android 12+ (SCAN / CONNECT) or older APIs (location for Classic discovery).
+
+### iOS (`Info.plist`)
+
+Add External Accessory protocols for your Zebra MFi models and Bluetooth usage strings:
+
+```xml
+<key>UISupportedExternalAccessoryProtocols</key>
+<array>
+  <string>com.zebra.rawport</string>
+  <!-- Add any additional Zebra protocol strings required for your models -->
+</array>
+<key>NSBluetoothAlwaysUsageDescription</key>
+<string>Connect to Zebra printers for boarding passes and bag tags.</string>
+<key>NSBluetoothPeripheralUsageDescription</key>
+<string>Connect to Zebra printers for boarding passes and bag tags.</string>
+```
+
+**MFi whitelisting:** the iOS app’s bundle ID must be registered with Zebra for the Link-OS / MFi accessory protocols you use. Pairing itself is done in **Settings → Bluetooth**; `client.pair(...)` returns `ZebraPairingResult.openSystemSettings` so the UI can explain that. USB is not supported by the Zebra iOS SDK.
 
 ## Usage
 
@@ -57,6 +97,48 @@ await bp.printZpl(r'''
 
 final status = await bp.queryStatus();
 debugPrint(status.hardwareStatusLabel);
+```
+
+### Discovery stream (RSSI / paired / mobile)
+
+```dart
+await client.ensureBluetoothPermissions();
+
+await for (final d in client.discoverStream(
+  types: [ZebraConnectionType.bluetooth, ZebraConnectionType.bluetoothLe],
+)) {
+  debugPrint(
+    '${d.displayName} rssi=${d.rssi} paired=${d.paired} mobile=${d.isMobileModel}',
+  );
+}
+```
+
+### Pairing
+
+```dart
+final result = await client.pair(descriptor);
+if (result == ZebraPairingResult.openSystemSettings) {
+  // iOS: show instructions to pair in Settings.
+}
+final bonded = await client.bondedPrinters();       // Android / Windows
+final accessories = await client.pairedAccessories(); // iOS MFi (+ Android bonded)
+```
+
+### Printer actions & batch
+
+```dart
+await printer.calibrate();
+await printer.printConfigurationLabel();
+await printer.printTestLabel(text: 'Gate A12');
+await printer.setDarkness(15);
+await printer.setSpeed(4);
+final battery = await printer.batteryPercent(); // null on many desktop models
+
+await for (final progress in printer.printBatch(jobs, waitForReady: true)) {
+  debugPrint('${progress.jobId} ${progress.state}');
+}
+printer.cancelBatch();
+await for (final progress in printer.retryFailedJobs()) { /* … */ }
 ```
 
 ### Bluetooth / USB (Android / iOS)
@@ -84,10 +166,6 @@ Image.asset(
   package: ZebraStatusAssets.package,
 );
 ```
-
-### iOS setup notes
-
-Add External Accessory protocols for your Zebra MFi models to the app `Info.plist` (`UISupportedExternalAccessoryProtocols`), and ensure Bluetooth permissions strings are present. USB is not supported by the Zebra iOS SDK.
 
 ### License note
 
