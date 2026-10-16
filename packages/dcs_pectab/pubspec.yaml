@@ -1,0 +1,17 @@
+name: dcs_pectab
+description: Lossless AEA PECTAB codec (boarding pass + bag tag) for DCS print templates.
+version: 0.1.0-dev
+publish_to: none
+repository: https://github.com/MahmoodBakhshayesh/dcs_packages
+issue_tracker: https://github.com/MahmoodBakhshayesh/dcs_packages/issues
+homepage: https://github.com/MahmoodBakhshayesh/dcs_packages/tree/main/packages/dcs_pectab
+license: MIT
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6

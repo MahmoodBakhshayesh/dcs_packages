@@ -11,6 +11,7 @@ Repository: [github.com/MahmoodBakhshayesh/dcs_packages](https://github.com/Mahm
 | [dcs_common](packages/dcs_common) | Shared runtime contracts, logging, status models | Dart |
 | [dcs_bcbp](packages/dcs_bcbp) | IATA BCBP barcode boarding pass parsing | Dart |
 | [dcs_mrz](packages/dcs_mrz) | Passport MRZ (TD3) parsing and check digits | Dart |
+| [dcs_pectab](packages/dcs_pectab) | Lossless AEA PECTAB codec (BP + BT print templates) | Dart |
 | [dcs_baggage](packages/dcs_baggage) | Baggage tags and BSM domain models | Dart |
 | [dcs_host](packages/dcs_host) | Host messaging adapter contracts | Dart |
 | [dcs_documents](packages/dcs_documents) | Boarding pass and bag tag print payloads | Dart |
