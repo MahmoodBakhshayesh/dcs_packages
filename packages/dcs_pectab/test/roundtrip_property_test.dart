@@ -72,8 +72,6 @@ String _fuzz(Random rng, int i) {
 
 String _fuzzBp(Random rng) {
   final table = 'SA1Z'[rng.nextInt(4)];
-  final emd = rng.nextBool() ? 'S9' : 'E9';
-  // When table is used with S9/E9: ?S9N or ?E9N style — keep simple ?${table}9N
   final header = 'PT##?${table}9N#@;#TICKT#CHKIN#BOARD#01011101#';
   final els = <String>[for (var k = 0; k < 1 + rng.nextInt(6); k++) _bpElement(rng)];
   return '$header${els.join('#')}#';
