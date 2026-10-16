@@ -5,6 +5,7 @@
 library;
 
 export 'src/bp_codec.dart';
+export 'src/catalog.dart';
 export 'src/geometry.dart';
 export 'src/bt_codec.dart';
 export 'src/template_codec.dart';
