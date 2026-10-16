@@ -25,18 +25,26 @@ void main() {
     expect(r.right, greaterThan(r.left));
   });
 
-  test('BT element and mirror ghost', () {
+  test('BT mirror ghost uses mirrorPoint along + flip across', () {
     final e = BtCodec.parseElement('92C0M1020060202') as BtElement;
     expect(e.mirror, isTrue);
     final primary = PectabGeometry.boundsOf(e)!;
     expect(primary.left, 20);
     expect(primary.top, 6);
-    final ghost = PectabGeometry.mirrorGhost(e)!;
-    expect(ghost.top, primary.top);
-    // centre reflected across 25 mm
-    final pc = primary.left + primary.width / 2;
-    final gc = ghost.left + ghost.width / 2;
-    expect(gc + pc, closeTo(50, 1e-9));
+    final ghost = PectabGeometry.mirrorGhost(e, mirrorPointMm: 270, tagWidthMm: 50)!;
+    final pcAlong = primary.left + primary.width / 2;
+    final gcAlong = ghost.left + ghost.width / 2;
+    expect(gcAlong + pcAlong, closeTo(2 * 270, 1e-6));
+    final pcAcross = primary.top + primary.height / 2;
+    final gcAcross = ghost.top + ghost.height / 2;
+    expect(gcAcross + pcAcross, closeTo(50, 1e-6));
+  });
+
+  test('mirrorOrientCode pairs', () {
+    expect(PectabGeometry.mirrorOrientCode('1'), '5');
+    expect(PectabGeometry.mirrorOrientCode('A'), 'E');
+    expect(PectabGeometry.mirrorOrientCode('I'), 'M');
+    expect(PectabGeometry.mirrorOrientCode('5'), '1');
   });
 
   test('BOX / LINE mm from 1/10 mm fields', () {

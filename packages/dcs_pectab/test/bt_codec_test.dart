@@ -41,10 +41,21 @@ void main() {
       expect(alias.literal, isNull);
     });
 
-    test('barcode B and I, line S', () {
+    test('barcode B and I, line S, RFID R, text K', () {
       expect((BtCodec.parseElement('03B1 A007260441') as BtElement).kind, BtKind.barcode);
       expect((BtCodec.parseElement('03I1 A007260441') as BtElement).kindCode, 'I');
       expect((BtCodec.parseElement('56S0 A295270452') as BtElement).kind, BtKind.line);
+      expect((BtCodec.parseElement('90R0 1001000505OID') as BtElement).kind, BtKind.rfid);
+      expect((BtCodec.parseElement('85K0 1004250202') as BtElement).kind, BtKind.text);
+    });
+
+    test('BT header mirrorPoint / tagWidth', () {
+      final doc = Pectab.parse('BTT1039~H0642270=#02C0 1004250202#') as BtDocument;
+      expect(doc.version, '1039');
+      expect(doc.tagWidth10, 642);
+      expect(doc.mirrorPointMm, 270);
+      expect(doc.continuationChar, '~');
+      expect(doc.elemRefChar, '=');
     });
 
     test('hex item numbers', () {

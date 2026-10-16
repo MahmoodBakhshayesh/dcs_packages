@@ -16,7 +16,8 @@ abstract final class PectabGeometry {
   // BT tag
   static const double btWidthMm = 50;
   static const double btMaxLengthMm = 515;
-  static const double btMirrorAxisMm = 25; // centre line
+  static const double btMirrorAxisMm = 25; // centre of width (legacy)
+  static const double btDefaultMirrorPointMm = 270;
 
   /// Axis-aligned rectangle in mm (origin top-left of the coupon / tag).
   static MmRect? boundsOf(PectabElement element, {double? btLengthMm}) {
@@ -31,19 +32,65 @@ abstract final class PectabGeometry {
     };
   }
 
-  /// Mirror ghost for a BT element (point reflection across the 25 mm axis).
-  static MmRect? mirrorGhost(BtElement element, {double? btLengthMm}) {
+  /// Mirror ghost for a BT element (AEA designer formula).
+  ///
+  /// With [mirrorPointMm] (along) and [tagWidthMm] (across):
+  /// `mirroredAlong = 2 * mirrorPoint - along`, `mirroredAcross = tagWidth - across`.
+  ///
+  /// Defaults match web AEA Designer (`mirrorPoint` 270, width [btWidthMm]).
+  static MmRect? mirrorGhost(
+    BtElement element, {
+    double? btLengthMm,
+    double mirrorPointMm = btDefaultMirrorPointMm,
+    double tagWidthMm = btWidthMm,
+  }) {
     final primary = _btBounds(element, btLengthMm ?? btMaxLengthMm);
     if (primary == null || !element.mirror) return null;
-    // Reflect across vertical centre line of the 50 mm width (across axis).
-    final centre = primary.left + primary.width / 2;
-    final mirroredCentre = 2 * btMirrorAxisMm - centre;
+    final cx = primary.left + primary.width / 2;
+    final cy = primary.top + primary.height / 2;
+    final mx = 2 * mirrorPointMm - cx;
+    final my = tagWidthMm - cy;
     return MmRect(
-      left: mirroredCentre - primary.width / 2,
-      top: primary.top,
+      left: mx - primary.width / 2,
+      top: my - primary.height / 2,
       width: primary.width,
       height: primary.height,
     );
+  }
+
+  /// Orientation character for a mirrored copy (AEA map 1↔5 … A↔E … I↔M).
+  static String mirrorOrientCode(String code) {
+    const map = {
+      '1': '5',
+      '2': '6',
+      '3': '7',
+      '4': '8',
+      '5': '1',
+      '6': '2',
+      '7': '3',
+      '8': '4',
+      'A': 'E',
+      'B': 'F',
+      'C': 'G',
+      'D': 'H',
+      'E': 'A',
+      'F': 'B',
+      'G': 'C',
+      'H': 'D',
+      'I': 'M',
+      'J': 'N',
+      'K': 'O',
+      'L': 'P',
+      'M': 'I',
+      'N': 'J',
+      'O': 'K',
+      'P': 'L',
+    };
+    if (code.isEmpty) return code;
+    final upper = code[0].toUpperCase();
+    final mapped = map[upper];
+    if (mapped == null) return code;
+    return code[0] == upper ? mapped : mapped.toLowerCase();
   }
 
   static MmRect? _bpTextBounds(int length, List<BpPos> positions) {

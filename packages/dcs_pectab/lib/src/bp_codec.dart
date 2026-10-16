@@ -24,9 +24,28 @@ abstract final class BpCodec {
       return UnknownElement(itemNo: itemNo, source: source);
     }
     final length = int.parse(rest.substring(0, 2));
-    final rem = rest.substring(2);
+    var rem = rest.substring(2);
     if (rem.isEmpty) {
       return BpReserved(itemNo: itemNo, source: source, length: length);
+    }
+
+    // Magstripe-only: exactly 4 digits.
+    if (rem.length == 4 && _allDigits(rem)) {
+      return BpText(
+        itemNo: itemNo,
+        source: source,
+        length: length,
+        positions: const [],
+        style: BpStyle.medium,
+        magStripe: rem,
+      );
+    }
+
+    String? magStripe;
+    // Magstripe + positions: 4 digits then row…
+    if (rem.length >= 4 && _allDigits(rem.substring(0, 4)) && rem.length > 4 && _isBpRow(rem[4])) {
+      magStripe = rem.substring(0, 4);
+      rem = rem.substring(4);
     }
 
     final positions = <BpPos>[];
@@ -37,32 +56,41 @@ abstract final class BpCodec {
       final colStr = rem.substring(i + 1, i + 3);
       if (!_isDigit(colStr[0]) || !_isDigit(colStr[1])) break;
       final col = int.parse(colStr);
-      if (col < 1 || col > 70) break;
+      if (col < 1 || col > 95) break; // web allows cols past 72 for model
       positions.add(BpPos(row: row.toUpperCase(), col: col));
       i += 3;
     }
-    if (positions.isEmpty) {
+    if (positions.isEmpty && magStripe == null) {
       return UnknownElement(itemNo: itemNo, source: source);
     }
 
+    String? steeringCmd;
     var style = BpStyle.medium;
     if (i < rem.length) {
-      final s = rem[i].toUpperCase();
-      if (s == 'L') {
-        style = BpStyle.small;
-        i++;
-      } else if (s == 'R') {
-        style = BpStyle.bold;
-        i++;
-      } else {
-        return UnknownElement(itemNo: itemNo, source: source);
+      final tail = rem.substring(i);
+      // Trailing L/R style only.
+      if (tail.length == 1 && (tail.toUpperCase() == 'L' || tail.toUpperCase() == 'R')) {
+        style = tail.toUpperCase() == 'L' ? BpStyle.small : BpStyle.bold;
+      } else if (tail.isNotEmpty) {
+        // Steering (and optional trailing style letter).
+        if (tail.length > 1 && (tail[tail.length - 1].toUpperCase() == 'L' || tail[tail.length - 1].toUpperCase() == 'R')) {
+          style = tail[tail.length - 1].toUpperCase() == 'L' ? BpStyle.small : BpStyle.bold;
+          steeringCmd = tail.substring(0, tail.length - 1);
+        } else {
+          steeringCmd = tail;
+        }
       }
     }
-    if (i != rem.length) {
-      return UnknownElement(itemNo: itemNo, source: source);
-    }
 
-    return BpText(itemNo: itemNo, source: source, length: length, positions: positions, style: style);
+    return BpText(
+      itemNo: itemNo,
+      source: source,
+      length: length,
+      positions: positions,
+      style: style,
+      magStripe: magStripe,
+      steeringCmd: steeringCmd,
+    );
   }
 
   static BpBarcode? _parseBarcode(String itemNo, String source, String afterB) {
@@ -101,14 +129,16 @@ abstract final class BpCodec {
     );
   }
 
-  static bool _isHex(String ch) {
-    final c = ch.codeUnitAt(0);
-    return (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
-  }
+  static bool _allDigits(String s) => s.split('').every(_isDigit);
 
   static bool _isDigit(String ch) {
     final c = ch.codeUnitAt(0);
     return c >= 48 && c <= 57;
+  }
+
+  static bool _isHex(String ch) {
+    final c = ch.codeUnitAt(0);
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
   }
 
   static bool _isBpRow(String ch) {

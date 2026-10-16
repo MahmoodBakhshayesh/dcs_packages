@@ -60,10 +60,11 @@ final class BpPos {
 
 /// BT element kind letter.
 enum BtKind {
-  text, // C
+  text, // C or K
   barcode, // B or I
   line, // S
   logo, // L
+  rfid, // R or T (RFID OID + data in [BtElement.literal])
 }
 
 /// BT tag stock family from the header id.
@@ -169,12 +170,35 @@ final class BtDocument extends PectabDocument {
     super.trailing,
     required this.version,
     required this.kind,
+    this.continuationChar = '~',
+    this.autoIncrement = 'H',
+    this.colorChar = '0',
+    this.tagWidth10 = 642,
+    this.mirrorPointMm = 270,
+    this.elemRefChar = '=',
   });
 
   /// Version / PECTAB id (`1039`, `1050`, `1139`, `1239`, …).
   String version;
 
   BtTagKind kind;
+
+  /// Header fields after `BTT` + table id (AEA designer parity).
+  String continuationChar;
+  String autoIncrement;
+  String colorChar;
+
+  /// Tag width in 1/10 mm (e.g. `642` → 64.2 mm physical; canvas often 50–54 mm).
+  int tagWidth10;
+
+  /// Vertical mirror point in mm (along the tag). Default `270`.
+  int mirrorPointMm;
+
+  /// Element data-ref character (usually `=`).
+  String elemRefChar;
+
+  /// Physical tag width for mirror preview (mm).
+  double get tagWidthMm => tagWidth10 / 10.0;
 }
 
 /// Separate template stream (`TT01#…`) — BOX / LINE (P5).
@@ -216,11 +240,25 @@ final class BpText extends PectabElement {
     required this.length,
     required this.positions,
     required this.style,
+    this.magStripe,
+    this.steeringCmd,
   });
 
   int length;
   List<BpPos> positions;
   BpStyle style;
+
+  /// Optional 4-digit magstripe block before print positions (AEA Variable).
+  String? magStripe;
+
+  /// Optional steering letters after the last position (e.g. `K35J62` remainder).
+  String? steeringCmd;
+
+  /// True when [source] / mock looks like a logo print command (`@nn`).
+  bool get isLogoCommand {
+    final s = steeringCmd ?? '';
+    return s.startsWith('@') || (positions.isEmpty && (magStripe?.startsWith('@') ?? false));
+  }
 
   @override
   String serializeEdited() {
@@ -230,7 +268,9 @@ final class BpText extends PectabElement {
       BpStyle.medium => '',
     };
     final len = length.clamp(0, 99).toString().padLeft(2, '0');
-    return '$itemNo$len${positions.map((p) => p.toString()).join()}$styleSuffix';
+    final mag = magStripe ?? '';
+    final steer = steeringCmd ?? '';
+    return '$itemNo$len$mag${positions.map((p) => p.toString()).join()}$steer$styleSuffix';
   }
 }
 
@@ -306,7 +346,7 @@ final class BtElement extends PectabElement {
 
   BtKind kind;
 
-  /// Original kind letter (`C`/`B`/`I`/`S`/`L`) — preserve `B` vs `I`.
+  /// Original kind letter (`C`/`K`/`B`/`I`/`S`/`L`/`R`/`T`) — preserve case / B vs I.
   String kindCode;
 
   /// Digit after the kind (`0`/`1`) — keep verbatim (Q1).

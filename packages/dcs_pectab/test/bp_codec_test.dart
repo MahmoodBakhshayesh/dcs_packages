@@ -28,6 +28,15 @@ void main() {
       expect(fe.length, 1);
       expect(fe.positions.single, BpPos(row: 'R', col: 1));
     });
+
+    test('magstripe only + magstripe with position', () {
+      final mag = BpCodec.parseElement('52101101') as BpText;
+      expect(mag.magStripe, '1101');
+      expect(mag.positions, isEmpty);
+      final both = BpCodec.parseElement('03101101F48') as BpText;
+      expect(both.magStripe, '1101');
+      expect(both.positions.single, BpPos(row: 'F', col: 48));
+    });
   });
 
   group('BpCodec reserved', () {

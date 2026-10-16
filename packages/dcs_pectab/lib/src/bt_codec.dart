@@ -104,10 +104,11 @@ abstract final class BtCodec {
 
   static BtKind? _kindOf(String code) {
     return switch (code.toUpperCase()) {
-      'C' => BtKind.text,
+      'C' || 'K' => BtKind.text,
       'B' || 'I' => BtKind.barcode,
       'S' => BtKind.line,
       'L' => BtKind.logo,
+      'R' || 'T' => BtKind.rfid,
       _ => null,
     };
   }

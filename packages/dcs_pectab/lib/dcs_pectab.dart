@@ -17,4 +17,4 @@ export 'src/parse.dart';
 export 'src/tokenizer.dart';
 
 /// Package version string (matches [pubspec] `version`).
-const String dcsPectabVersion = '0.1.0';
+const String dcsPectabVersion = '0.1.1';

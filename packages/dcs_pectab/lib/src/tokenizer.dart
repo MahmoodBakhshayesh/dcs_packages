@@ -48,12 +48,19 @@ abstract final class PectabTokenizer {
     final header = input.substring(0, end);
     final (elements, trailing) = _bodyElements(input.substring(end));
     final version = _btVersion(header);
+    final fields = _btHeaderFields(header);
     return BtDocument(
       header: header,
       elements: elements,
       trailing: trailing,
       version: version,
       kind: _btTagKind(version),
+      continuationChar: fields.cont,
+      autoIncrement: fields.auto,
+      colorChar: fields.color,
+      tagWidth10: fields.width10,
+      mirrorPointMm: fields.mirrorMm,
+      elemRefChar: fields.ref,
     );
   }
 
@@ -172,8 +179,27 @@ abstract final class PectabTokenizer {
   }
 
   static String _btVersion(String header) {
+    // Prefer 4-digit table id after BTT (`BTT1039~…`).
+    final m4 = RegExp(r'^BTT([0-9A-Za-z]{4})', caseSensitive: false).firstMatch(header);
+    if (m4 != null) return m4.group(1)!;
     final m = RegExp(r'^BT[T]?([0-9A-Za-z]+)', caseSensitive: false).firstMatch(header);
     return m?.group(1) ?? '';
+  }
+
+  /// Parse `BTT` + table(4) + cont + auto + color + width(3) + mirror(3) + ref.
+  static ({String cont, String auto, String color, int width10, int mirrorMm, String ref}) _btHeaderFields(
+    String header,
+  ) {
+    const defaults = (cont: '~', auto: 'H', color: '0', width10: 642, mirrorMm: 270, ref: '=');
+    final body = header.toUpperCase().startsWith('BTT') ? header.substring(3) : header;
+    if (body.length < 14) return defaults;
+    final cont = body.length > 4 ? body[4] : defaults.cont;
+    final auto = body.length > 5 ? body[5] : defaults.auto;
+    final color = body.length > 6 ? body[6] : defaults.color;
+    final width10 = body.length >= 10 ? int.tryParse(body.substring(7, 10)) ?? defaults.width10 : defaults.width10;
+    final mirrorMm = body.length >= 13 ? int.tryParse(body.substring(10, 13)) ?? defaults.mirrorMm : defaults.mirrorMm;
+    final ref = body.length > 13 ? body[13] : defaults.ref;
+    return (cont: cont, auto: auto, color: color, width10: width10, mirrorMm: mirrorMm, ref: ref);
   }
 
   static BtTagKind _btTagKind(String version) {
