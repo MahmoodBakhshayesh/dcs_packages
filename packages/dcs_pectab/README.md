@@ -29,8 +29,8 @@ dependencies:
 
 ## Status
 
-Skeleton only (`0.1.0-dev`). Tickets P2–P10 add tokenizer, BP/BT codecs, templates, round-trip
-tests, geometry, catalog, lint, and sample-data parsing; then tag `dcs_pectab-v0.1.0`.
+Model + tokenizer done (P2). Tickets P3–P10 add BP/BT codecs, templates, round-trip tests,
+geometry, catalog, lint, and sample-data parsing; then tag `dcs_pectab-v0.1.0`.
 
 ## More information
 
