@@ -24,13 +24,13 @@ dependencies:
     git:
       url: https://github.com/MahmoodBakhshayesh/dcs_packages.git
       path: packages/dcs_pectab
-      ref: dcs_pectab-v0.1.0   # pin a tag once P10 lands
+      ref: dcs_pectab-v0.1.0
 ```
 
 ## Status
 
-BP + BT codecs done (P3–P4). Tickets P5–P10 add templates, round-trip tests, geometry,
-catalog, lint, and sample-data parsing; then tag `dcs_pectab-v0.1.0`.
+Tagged **`dcs_pectab-v0.1.0`**: tokenizer, BP/BT/TT codecs, round-trip property tests, geometry,
+catalog, lint, AEA answer decoder, CP/BTP sample parser.
 
 ## More information
 

@@ -5,6 +5,7 @@
 library;
 
 export 'src/bp_codec.dart';
+export 'src/sample_data.dart';
 export 'src/aea_answer.dart';
 export 'src/lint.dart';
 export 'src/catalog.dart';
@@ -16,4 +17,4 @@ export 'src/parse.dart';
 export 'src/tokenizer.dart';
 
 /// Package version string (matches [pubspec] `version`).
-const String dcsPectabVersion = '0.1.0-dev';
+const String dcsPectabVersion = '0.1.0';
