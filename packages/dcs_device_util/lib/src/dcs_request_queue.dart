@@ -112,35 +112,109 @@ class DcsDeviceResponse {
   bool get isOk => status == DcsDeviceResponseStatus.ok;
 }
 
+/// Depth of one device's request queue: [waiting] commands behind the [running] one.
+class DcsQueueState {
+  const DcsQueueState({this.waiting = 0, this.running = 0});
+
+  /// Commands queued behind the one on the wire.
+  final int waiting;
+
+  /// Commands on the wire waiting for their response (0 or 1 — the queue is strictly serial).
+  final int running;
+
+  int get depth => waiting + running;
+
+  bool get isIdle => depth == 0;
+
+  @override
+  bool operator ==(Object other) => other is DcsQueueState && other.waiting == waiting && other.running == running;
+
+  @override
+  int get hashCode => Object.hash(waiting, running);
+
+  @override
+  String toString() => 'DcsQueueState(waiting: $waiting, running: $running)';
+}
+
 /// Serializes request/response traffic for devices that answer one command at a time.
+///
+/// Observe the queue with [state] / [states]; pass `onStart` to a send to learn when that command actually reaches
+/// the device (after everything queued before it finished).
 class DcsDeviceRequestQueue {
-  DcsDeviceRequestQueue(this._session, {DcsDeviceRequestOptions defaultOptions = const DcsDeviceRequestOptions()})
-    : _defaultOptions = defaultOptions;
+  DcsDeviceRequestQueue(
+    this._session, {
+    DcsDeviceRequestOptions defaultOptions = const DcsDeviceRequestOptions(),
+    void Function(DcsQueueState state)? onStateChanged,
+  }) : _defaultOptions = defaultOptions,
+       _onStateChanged = onStateChanged;
 
   final DcsDeviceSession _session;
   final DcsDeviceRequestOptions _defaultOptions;
+  final void Function(DcsQueueState state)? _onStateChanged;
+  final _states = StreamController<DcsQueueState>.broadcast(sync: true);
   Future<void> _tail = Future<void>.value();
+  int _waiting = 0;
+  int _running = 0;
 
-  Future<DcsDeviceResponse> sendText(String command, {DcsDeviceRequestOptions? options}) {
-    final requestOptions = options ?? _defaultOptions;
-    return sendBytes(requestOptions.encoding.encode(command), options: requestOptions);
+  /// Current depth.
+  DcsQueueState get state => DcsQueueState(waiting: _waiting, running: _running);
+
+  /// Every depth change (enqueue, start, finish).
+  Stream<DcsQueueState> get states => _states.stream;
+
+  void _emit() {
+    final next = state;
+    _onStateChanged?.call(next);
+    if (!_states.isClosed) _states.add(next);
   }
 
-  Future<DcsDeviceResponse> sendBytes(List<int> command, {DcsDeviceRequestOptions? options}) {
+  Future<DcsDeviceResponse> sendText(
+    String command, {
+    DcsDeviceRequestOptions? options,
+    void Function()? onStart,
+  }) {
+    final requestOptions = options ?? _defaultOptions;
+    return sendBytes(requestOptions.encoding.encode(command), options: requestOptions, onStart: onStart);
+  }
+
+  /// Queues [command]; [onStart] runs right before it is written (its turn on the device).
+  Future<DcsDeviceResponse> sendBytes(
+    List<int> command, {
+    DcsDeviceRequestOptions? options,
+    void Function()? onStart,
+  }) {
     final completer = Completer<DcsDeviceResponse>();
     final requestOptions = options ?? _defaultOptions;
+    _waiting++;
+    _emit();
 
     _tail = _tail
         .then((_) async {
+          _waiting--;
+          _running++;
+          _emit();
           try {
+            try {
+              onStart?.call();
+            } catch (_) {
+              // Observer errors must not break the device queue.
+            }
             completer.complete(await _execute(command, requestOptions));
           } catch (error, stackTrace) {
             completer.completeError(error, stackTrace);
+          } finally {
+            _running--;
+            _emit();
           }
         })
         .catchError((Object _) {});
 
     return completer.future;
+  }
+
+  /// Stops emitting [states] (the session closed).
+  void close() {
+    if (!_states.isClosed) _states.close();
   }
 
   Future<DcsDeviceResponse> _execute(List<int> command, DcsDeviceRequestOptions options) async {

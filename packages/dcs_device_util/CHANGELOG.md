@@ -1,3 +1,10 @@
+## 0.2.11
+
+* Request-queue observability: `DcsQueueState` (`waiting` / `running` / `depth`), `DcsDeviceRequestQueue.state` /
+  `states`, `DcsDeviceController.queueStateFor` / `queueStates` / `queueStatesFor`.
+* `onStart` on `sendText` / `sendBytes` / `sendRequest` / `sendTextRequest` — runs when the command reaches the
+  device (after everything queued before it), so apps can show queued → sending exactly.
+
 ## 0.2.10
 
 * `DcsDeviceRequestOptions.postWriteHold` — optional hold after write/response before

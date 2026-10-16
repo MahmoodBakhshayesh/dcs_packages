@@ -42,6 +42,8 @@ class DcsDeviceController {
   final _statuses = <String, DcsDeviceStatus>{};
   final _sessions = <String, DcsDeviceSession>{};
   final _requestQueues = <String, DcsDeviceRequestQueue>{};
+  final _queueStates = <String, DcsQueueState>{};
+  final _queueController = StreamController<MapEntry<String, DcsQueueState>>.broadcast();
   final _dataControllers = <String, StreamController<List<int>>>{};
   final _dataSubscriptions = <String, StreamSubscription<List<int>>>{};
   final _healthTimers = <String, Timer>{};
@@ -300,7 +302,8 @@ class DcsDeviceController {
     _healthTimers.remove(profileId)?.cancel();
     _missedHeartbeats.remove(profileId);
     await _dataSubscriptions.remove(profileId)?.cancel();
-    _requestQueues.remove(profileId);
+    _requestQueues.remove(profileId)?.close();
+    _setQueueState(profileId, const DcsQueueState());
 
     final session = _sessions.remove(profileId);
     if (session != null) {
@@ -354,16 +357,19 @@ class DcsDeviceController {
   }
 
   /// Sends a command and waits for the matching response in profile order.
+  ///
+  /// [onStart] runs when the command reaches the device (everything queued before it has finished).
   Future<DcsDeviceResponse> sendRequest(
     String profileId,
     List<int> bytes, {
     DcsDeviceRequestOptions options = const DcsDeviceRequestOptions(),
+    void Function()? onStart,
   }) async {
     try {
       return await _requestQueueFor(
         profileId,
         options,
-      ).sendBytes(bytes, options: options);
+      ).sendBytes(bytes, options: options, onStart: onStart);
     } catch (error, stackTrace) {
       await _handleSessionIoFailure(profileId, error, stackTrace);
       rethrow;
@@ -371,20 +377,39 @@ class DcsDeviceController {
   }
 
   /// Sends encoded text and waits for a classified response.
+  ///
+  /// [onStart] runs when the command reaches the device (everything queued before it has finished).
   Future<DcsDeviceResponse> sendTextRequest(
     String profileId,
     String command, {
     DcsDeviceRequestOptions options = const DcsDeviceRequestOptions(),
+    void Function()? onStart,
   }) async {
     try {
       return await _requestQueueFor(
         profileId,
         options,
-      ).sendText(command, options: options);
+      ).sendText(command, options: options, onStart: onStart);
     } catch (error, stackTrace) {
       await _handleSessionIoFailure(profileId, error, stackTrace);
       rethrow;
     }
+  }
+
+  /// Request-queue depth of [profileId] (idle when not connected).
+  DcsQueueState queueStateFor(String profileId) => _queueStates[profileId] ?? const DcsQueueState();
+
+  /// Queue depth changes of every profile (`profileId` → state).
+  Stream<MapEntry<String, DcsQueueState>> get queueStates => _queueController.stream;
+
+  /// Queue depth changes of one profile.
+  Stream<DcsQueueState> queueStatesFor(String profileId) =>
+      queueStates.where((e) => e.key == profileId).map((e) => e.value);
+
+  void _setQueueState(String profileId, DcsQueueState state) {
+    if (_queueStates[profileId] == state) return;
+    _queueStates[profileId] = state;
+    if (!_queueController.isClosed) _queueController.add(MapEntry(profileId, state));
   }
 
   Stream<List<int>> dataFor(String profileId) {
@@ -473,7 +498,12 @@ class DcsDeviceController {
       await session.close();
     }
     _sessions.clear();
+    for (final queue in _requestQueues.values) {
+      queue.close();
+    }
     _requestQueues.clear();
+    _queueStates.clear();
+    await _queueController.close();
 
     for (final controller in _dataControllers.values) {
       await controller.close();
@@ -884,7 +914,11 @@ class DcsDeviceController {
 
     return _requestQueues.putIfAbsent(
       profileId,
-      () => DcsDeviceRequestQueue(session, defaultOptions: options),
+      () => DcsDeviceRequestQueue(
+        session,
+        defaultOptions: options,
+        onStateChanged: (state) => _setQueueState(profileId, state),
+      ),
     );
   }
 
