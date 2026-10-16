@@ -5,6 +5,8 @@
 library;
 
 export 'src/bp_codec.dart';
+export 'src/aea_answer.dart';
+export 'src/lint.dart';
 export 'src/catalog.dart';
 export 'src/geometry.dart';
 export 'src/bt_codec.dart';
