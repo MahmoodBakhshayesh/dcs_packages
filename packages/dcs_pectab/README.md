@@ -29,8 +29,8 @@ dependencies:
 
 ## Status
 
-Model + tokenizer done (P2). Tickets P3–P10 add BP/BT codecs, templates, round-trip tests,
-geometry, catalog, lint, and sample-data parsing; then tag `dcs_pectab-v0.1.0`.
+BP codec done (P3). Tickets P4–P10 add BT codec, templates, round-trip tests, geometry,
+catalog, lint, and sample-data parsing; then tag `dcs_pectab-v0.1.0`.
 
 ## More information
 

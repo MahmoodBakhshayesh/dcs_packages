@@ -221,6 +221,17 @@ final class BpText extends PectabElement {
   int length;
   List<BpPos> positions;
   BpStyle style;
+
+  @override
+  String serializeEdited() {
+    final styleSuffix = switch (style) {
+      BpStyle.small => 'L',
+      BpStyle.bold => 'R',
+      BpStyle.medium => '',
+    };
+    final len = length.clamp(0, 99).toString().padLeft(2, '0');
+    return '$itemNo$len${positions.map((p) => p.toString()).join()}$styleSuffix';
+  }
 }
 
 final class BpBarcode extends PectabElement {
@@ -246,12 +257,31 @@ final class BpBarcode extends PectabElement {
   int ecc;
   int hri;
   bool rotate180;
+
+  @override
+  String serializeEdited() {
+    final hh = heightMm.toString().padLeft(2, '0');
+    return '$itemNo'
+        'B'
+        '${rotate180 ? 'R' : ''}'
+        '$typeCode'
+        '$pos'
+        '$hh'
+        '$ecc'
+        '$hri';
+  }
 }
 
 final class BpReserved extends PectabElement {
   BpReserved({required super.itemNo, required super.source, super.dirty, required this.length});
 
   int length;
+
+  @override
+  String serializeEdited() {
+    final len = length.clamp(0, 99).toString().padLeft(2, '0');
+    return '$itemNo$len';
+  }
 }
 
 final class BtElement extends PectabElement {
