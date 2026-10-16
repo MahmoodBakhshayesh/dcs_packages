@@ -354,6 +354,19 @@ final class BoxElement extends PectabElement {
 
   int x10, y10, h10, l10, border10;
   String reserved;
+
+  @override
+  String serializeEdited() {
+    final body =
+        'B'
+        '${x10.toString().padLeft(4, '0')}'
+        '${y10.toString().padLeft(3, '0')}'
+        '${h10.toString().padLeft(3, '0')}'
+        '${l10.toString().padLeft(4, '0')}'
+        '${border10.toString().padLeft(3, '0')}'
+        '$reserved';
+    return itemNo.isEmpty ? body : '$itemNo$body';
+  }
 }
 
 final class LineElement extends PectabElement {
@@ -370,6 +383,18 @@ final class LineElement extends PectabElement {
 
   int x10, y10, h10, l10;
   String reserved;
+
+  @override
+  String serializeEdited() {
+    final body =
+        'S'
+        '${x10.toString().padLeft(4, '0')}'
+        '${y10.toString().padLeft(3, '0')}'
+        '${h10.toString().padLeft(3, '0')}'
+        '${l10.toString().padLeft(4, '0')}'
+        '$reserved';
+    return itemNo.isEmpty ? body : '$itemNo$body';
+  }
 }
 
 /// Anything not (yet) understood — always verbatim.

@@ -18,4 +18,5 @@ const manualBt =
 const manualTemplateBox = 'TT01#01B0230600150105000100000#';
 const manualTemplateLine = 'TT01#03S0001100006174000000#';
 const aeaBoxExample = 'B0200240100050000500000#';
-const aeaLineExample = 'S020024005005000000#';
+const aeaLineExample = 'S0200240050050000000#'; // SPEC text omitted one zero; 19 digits after S
+const aeaLineExampleAsPrintedInSpec = 'S020024005005000000#';
