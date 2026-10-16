@@ -1,5 +1,6 @@
 ## 0.1.0-dev
 
-* P3: BP codec — text (multi-position, L/R), reserved, barcode (type, R rotate, height, ecc, hri).
-* P2: document model + lossless tokenizer.
-* P1: package skeleton.
+* P4: BT codec — kind/variant, space/`M`, orient 1–8/A–H/I–P, mm fields, literal, `=NN`, hex items.
+* P3: BP codec — text, reserved, barcode.
+* P2: model + tokenizer.
+* P1: skeleton.

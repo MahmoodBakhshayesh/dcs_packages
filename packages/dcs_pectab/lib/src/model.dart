@@ -325,6 +325,18 @@ final class BtElement extends PectabElement {
 
   /// True when a space stood for "no mirror" in the source (`C0 1…` vs `C0M1…`).
   bool spaceBeforeOrient;
+
+  @override
+  String serializeEdited() {
+    final mirrorOrSpace = mirror ? 'M' : (spaceBeforeOrient ? ' ' : ' ');
+    final geo =
+        '${alongMm.toString().padLeft(3, '0')}'
+        '${acrossMm.toString().padLeft(2, '0')}'
+        '${heightMm.toString().padLeft(2, '0')}'
+        '${strokeMm.toString().padLeft(2, '0')}';
+    final tail = aliasOf != null ? '=${aliasOf!}' : (literal ?? '');
+    return '$itemNo$kindCode$variant$mirrorOrSpace$orientCode$geo$tail';
+  }
 }
 
 final class BoxElement extends PectabElement {

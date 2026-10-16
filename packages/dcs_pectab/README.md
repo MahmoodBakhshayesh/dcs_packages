@@ -29,7 +29,7 @@ dependencies:
 
 ## Status
 
-BP codec done (P3). Tickets P4–P10 add BT codec, templates, round-trip tests, geometry,
+BP + BT codecs done (P3–P4). Tickets P5–P10 add templates, round-trip tests, geometry,
 catalog, lint, and sample-data parsing; then tag `dcs_pectab-v0.1.0`.
 
 ## More information

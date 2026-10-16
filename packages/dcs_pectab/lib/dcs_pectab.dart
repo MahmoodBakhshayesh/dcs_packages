@@ -5,6 +5,7 @@
 library;
 
 export 'src/bp_codec.dart';
+export 'src/bt_codec.dart';
 export 'src/model.dart';
 export 'src/parse.dart';
 export 'src/tokenizer.dart';

@@ -1,4 +1,5 @@
 import 'bp_codec.dart';
+import 'bt_codec.dart';
 import 'model.dart';
 import 'tokenizer.dart';
 
@@ -17,7 +18,13 @@ abstract final class Pectab {
         tableId: doc.tableId,
         emd: doc.emd,
       ),
-      BtDocument() => doc, // BT codec: P4
+      BtDocument() => BtDocument(
+        header: doc.header,
+        elements: [for (final e in doc.elements) BtCodec.parseElement(e.source)],
+        trailing: doc.trailing,
+        version: doc.version,
+        kind: doc.kind,
+      ),
       TemplateDocument() => doc, // BOX/LINE: P5
       RawDocument() => doc,
     };
