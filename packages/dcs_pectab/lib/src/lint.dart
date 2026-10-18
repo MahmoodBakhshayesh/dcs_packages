@@ -2,7 +2,9 @@ import 'catalog.dart';
 import 'geometry.dart';
 import 'model.dart';
 
-enum PectabLintSeverity { error, warn }
+/// `info` = worth knowing, not wrong (e.g. a shorter length than the catalog max, items the catalog does not
+/// list, intentional BT duplicates).
+enum PectabLintSeverity { error, warn, info }
 
 final class PectabLintIssue {
   const PectabLintIssue({required this.severity, required this.message, this.itemNo, this.elementIndex});
@@ -27,10 +29,10 @@ abstract final class PectabLint {
       final no = e.itemNo;
       if (no.isNotEmpty) {
         if (seen.containsKey(no)) {
-          // duplicate item number — warn (BT allows intentional duplicates like FF)
+          // duplicate item number — BP warn; BT info (intentional repeats like FF in the manual sample)
           out.add(
             PectabLintIssue(
-              severity: PectabLintSeverity.warn,
+              severity: doc is BtDocument ? PectabLintSeverity.info : PectabLintSeverity.warn,
               message: 'duplicate item number $no',
               itemNo: no,
               elementIndex: i,
@@ -63,8 +65,8 @@ abstract final class PectabLint {
                 elementIndex: i,
               ),
             );
-          } else if (bounds.right > PectabGeometry.bpWidthMm + 0.01 ||
-              bounds.bottom > PectabGeometry.bpHeightMm + 0.01) {
+          } else if (e is! BpText && // text overrun is reported per position ("runs past 70")
+              (bounds.right > PectabGeometry.bpWidthMm + 0.01 || bounds.bottom > PectabGeometry.bpHeightMm + 0.01)) {
             out.add(
               PectabLintIssue(
                 severity: PectabLintSeverity.warn,
@@ -84,7 +86,7 @@ abstract final class PectabLint {
                 elementIndex: i,
               ),
             );
-          } else if (bounds.top + bounds.height > PectabGeometry.btWidthMm + 0.01) {
+          } else if (bounds.top + bounds.height > doc.tagWidthMm + 0.01) {
             out.add(
               PectabLintIssue(
                 severity: PectabLintSeverity.warn,
@@ -153,7 +155,7 @@ abstract final class PectabLint {
       if (cat == null) {
         out.add(
           PectabLintIssue(
-            severity: PectabLintSeverity.warn,
+            severity: PectabLintSeverity.info,
             message: 'item not in catalog',
             itemNo: e.itemNo,
             elementIndex: i,
@@ -162,7 +164,7 @@ abstract final class PectabLint {
       } else if (cat.maxLength != null && e.length < cat.maxLength!) {
         out.add(
           PectabLintIssue(
-            severity: PectabLintSeverity.warn,
+            severity: PectabLintSeverity.info,
             message: 'length below catalog max (${cat.maxLength})',
             itemNo: e.itemNo,
             elementIndex: i,
@@ -175,7 +177,7 @@ abstract final class PectabLint {
       if (PectabCatalog.bpByItem(e.itemNo) == null) {
         out.add(
           PectabLintIssue(
-            severity: PectabLintSeverity.warn,
+            severity: PectabLintSeverity.info,
             message: 'item not in catalog',
             itemNo: e.itemNo,
             elementIndex: i,
@@ -198,11 +200,13 @@ abstract final class PectabLint {
         ),
       );
     }
-    // alias targets validated in a second pass
-    if (PectabCatalog.btByItem(e.itemNo) == null) {
+    // alias targets validated in a second pass. Literal / alias / line / logo / RFID slots print fixed text or
+    // another item — the catalog check only applies to plain data items.
+    final plainData = e.kind == BtKind.text && (e.literal?.isEmpty ?? true) && e.aliasOf == null;
+    if (plainData && PectabCatalog.btByItem(e.itemNo) == null) {
       out.add(
         PectabLintIssue(
-          severity: PectabLintSeverity.warn,
+          severity: PectabLintSeverity.info,
           message: 'item not in catalog',
           itemNo: e.itemNo,
           elementIndex: i,
