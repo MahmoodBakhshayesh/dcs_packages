@@ -1,3 +1,11 @@
+## 0.1.3
+
+* Paste cleanup: line breaks and a short label before the preamble (`copied: BTT1039…`) are dropped before parsing;
+  never cuts into `#` segments, so raw streams still round-trip.
+* Web-designer BP barcode form `B[R|L]{row}{col}{ww}{hh}` (`FABRE422232`) parses as a PDF417 `BpBarcode`
+  (`shortWidth`, `shortOrient`), is drawn (≥ 45 × 18 mm, rising from its row) and re-serializes in the same form when
+  moved. The manual form (`FAB6Q252033`) is unchanged.
+
 ## 0.1.2
 
 * `PectabShape` + `PectabGeometry.shapesOf` / `mirrorShapeOf` / `btCharsOf`: oriented printed boxes (anchor, local

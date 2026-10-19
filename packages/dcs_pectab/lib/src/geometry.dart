@@ -95,6 +95,14 @@ abstract final class PectabGeometry {
   }
 
   static PectabShape _bpBarcodeShape(BpBarcode e) {
+    final sw = int.tryParse(e.shortWidth ?? '');
+    if (sw != null) {
+      // Web-designer short form: width code drives the size (its own preview: ≥ 45 × 18 mm).
+      final w = math.max(45.0, sw * 2.5);
+      final h = math.max(18.0, sw.toDouble());
+      final bottom = (_rowIndex(e.pos.row) + 1) * bpCellH;
+      return PectabShape(ax: (e.pos.col - 1) * bpCellW, ay: bottom, local: MmRect(left: 0, top: -h, width: w, height: h));
+    }
     final h = math.max(e.heightMm, 1).toDouble();
     final w = switch (e.type) {
       BpBarcodeType.qr => h,

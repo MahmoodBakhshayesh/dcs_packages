@@ -94,6 +94,8 @@ abstract final class BpCodec {
   }
 
   static BpBarcode? _parseBarcode(String itemNo, String source, String afterB) {
+    final short = _parseShortBarcode(itemNo, source, afterB);
+    if (short != null) return short;
     var rem = afterB;
     var rotate180 = false;
     if (rem.isNotEmpty && rem[0].toUpperCase() == 'R') {
@@ -126,6 +128,27 @@ abstract final class BpCodec {
       ecc: int.parse(eccCh),
       hri: int.parse(hriCh),
       rotate180: rotate180,
+    );
+  }
+
+  /// Web-designer form: `B` + optional `R`/`L` + row + col(2) + width(2) + height(2), PDF417.
+  static BpBarcode? _parseShortBarcode(String itemNo, String source, String afterB) {
+    final m = RegExp(r'^([LR]?)([A-Ra-r])(\d{2})(\d{2})(\d{2})$').firstMatch(afterB);
+    if (m == null) return null;
+    final col = int.parse(m.group(3)!);
+    if (col < 1 || col > 72) return null;
+    return BpBarcode(
+      itemNo: itemNo,
+      source: source,
+      type: BpBarcodeType.pdf417,
+      typeCode: '6',
+      pos: BpPos(row: m.group(2)!.toUpperCase(), col: col),
+      heightMm: int.parse(m.group(5)!),
+      ecc: 0,
+      hri: 0,
+      rotate180: false,
+      shortWidth: m.group(4),
+      shortOrient: m.group(1)!.toUpperCase(),
     );
   }
 

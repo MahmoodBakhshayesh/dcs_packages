@@ -13,6 +13,7 @@ import 'model.dart';
 abstract final class PectabTokenizer {
   /// Parse [input] into a typed document shell (BP / BT / template / raw).
   static PectabDocument tokenize(String input) {
+    input = clean(input);
     if (input.isEmpty) {
       return RawDocument(header: '', elements: const []);
     }
@@ -28,6 +29,17 @@ abstract final class PectabTokenizer {
       return _tokenizeTemplate(input);
     }
     return _tokenizeRaw(input);
+  }
+
+  /// Drops line breaks and anything pasted before the first `BTT` / `PT#` / `TTnn#` preamble.
+  static String clean(String input) {
+    var s = input.replaceAll(RegExp(r'[\r\n]+'), '');
+    final upper = s.toUpperCase();
+    if (upper.startsWith('PT') || upper.startsWith('BT') || upper.startsWith('TT')) return s;
+    // Only a short label in front ("copied: BTT…") — never cut into `#` segments of a raw stream.
+    final m = RegExp(r'BTT\d{4}|PT##|TT[0-9A-F]{2}#').firstMatch(upper);
+    if (m != null && !s.substring(0, m.start).contains('#')) s = s.substring(m.start);
+    return s;
   }
 
   static BpDocument _tokenizeBp(String input) {

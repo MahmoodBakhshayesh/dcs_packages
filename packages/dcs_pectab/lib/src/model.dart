@@ -286,6 +286,8 @@ final class BpBarcode extends PectabElement {
     required this.ecc,
     required this.hri,
     required this.rotate180,
+    this.shortWidth,
+    this.shortOrient = '',
   });
 
   BpBarcodeType type;
@@ -298,9 +300,16 @@ final class BpBarcode extends PectabElement {
   int hri;
   bool rotate180;
 
+  /// Short (web-designer) form `B[R|L]{row}{col}{ww}{hh}` — width code; null for the manual form.
+  String? shortWidth;
+
+  /// Short form orientation letter (`''`, `R`, `L`) — kept verbatim.
+  String shortOrient;
+
   @override
   String serializeEdited() {
     final hh = heightMm.toString().padLeft(2, '0');
+    if (shortWidth != null) return '${itemNo}B$shortOrient$pos$shortWidth$hh';
     return '$itemNo'
         'B'
         '${rotate180 ? 'R' : ''}'
