@@ -54,6 +54,9 @@ class DcsDeviceController {
   final _autoConnectBlocked = <String>{};
   /// Bumped by [disconnect] so in-flight [connect] retry loops abort.
   final _connectEpoch = <String, int>{};
+  /// After a power-cycle reappear / Access Denied, wait before the next CreateFile.
+  final _comSettleNeeded = <String>{};
+  final _comOpenCooldownUntil = <String, DateTime>{};
 
   Timer? _monitorTimer;
   bool _closed = false;
@@ -200,6 +203,8 @@ class DcsDeviceController {
       // Keep the block after Access Denied while the port is still listed.
       if (wasAbsent) {
         _autoConnectBlocked.remove(profile.id);
+        // USB-serial drivers need settle time after re-enumerate before CreateFile.
+        _comSettleNeeded.add(profile.id);
       }
       _setStatus(
         profile.id,
@@ -250,13 +255,14 @@ class DcsDeviceController {
     String profileId, {
     bool force = false,
     bool blockOnFailure = true,
+    bool settleBeforeFirst = false,
   }) async {
     _ensureOpen();
 
     if (_sessions.containsKey(profileId)) {
       if (!force) return;
       await disconnect(profileId, allowAutoReconnect: false);
-      await Future<void>.delayed(const Duration(milliseconds: 400));
+      await Future<void>.delayed(const Duration(milliseconds: 800));
     } else if (_connecting.contains(profileId)) {
       if (!force) return;
       // Cancel the stuck retry loop, wait for it to exit, then settle.
@@ -264,11 +270,20 @@ class DcsDeviceController {
       for (var i = 0; i < 100 && _connecting.contains(profileId); i += 1) {
         await Future<void>.delayed(const Duration(milliseconds: 50));
       }
-      await Future<void>.delayed(const Duration(milliseconds: 400));
+      await Future<void>.delayed(const Duration(milliseconds: 800));
     }
 
     if (_sessions.containsKey(profileId) || _connecting.contains(profileId)) {
       return;
+    }
+
+    final cooldownUntil = _comOpenCooldownUntil[profileId];
+    if (cooldownUntil != null) {
+      final wait = cooldownUntil.difference(DateTime.now());
+      if (wait > Duration.zero) {
+        await Future<void>.delayed(wait);
+      }
+      _comOpenCooldownUntil.remove(profileId);
     }
 
     final profile = _profileById(profileId);
@@ -303,12 +318,15 @@ class DcsDeviceController {
 
     _autoConnectBlocked.remove(profileId);
     final epoch = _connectEpoch[profileId] ?? 0;
+    final needsSettle = force ||
+        settleBeforeFirst ||
+        _comSettleNeeded.remove(profileId);
     _connecting.add(profileId);
     try {
       await _connectWithRetry(
         profile,
         epoch: epoch,
-        settleBeforeFirst: force,
+        settleBeforeFirst: needsSettle,
         blockOnFailure: blockOnFailure,
       );
     } finally {
@@ -330,9 +348,9 @@ class DcsDeviceController {
     // Block monitor auto-connect while we settle the COM handle — Windows often
     // returns ERROR_ACCESS_DENIED (5) if reopen races the previous close.
     await disconnect(profileId, allowAutoReconnect: false);
-    await Future<void>.delayed(const Duration(milliseconds: 400));
+    await Future<void>.delayed(const Duration(milliseconds: 800));
     await discover();
-    await connect(profileId, force: true);
+    await connect(profileId, force: true, settleBeforeFirst: true);
   }
 
   /// Disconnects [profileId] and cancels any in-flight connect/retry for it.
@@ -595,7 +613,14 @@ class DcsDeviceController {
           );
           await disconnect(profile.id, allowAutoReconnect: true);
           if (_config.autoReconnect && !_closed) {
-            unawaited(connect(profile.id, blockOnFailure: false));
+            _comSettleNeeded.add(profile.id);
+            unawaited(
+              connect(
+                profile.id,
+                settleBeforeFirst: true,
+                blockOnFailure: false,
+              ),
+            );
           }
         }
         continue;
@@ -605,12 +630,22 @@ class DcsDeviceController {
           _autoConnectBlocked.contains(profile.id)) {
         continue;
       }
+      final cooldownUntil = _comOpenCooldownUntil[profile.id];
+      if (cooldownUntil != null && DateTime.now().isBefore(cooldownUntil)) {
+        continue;
+      }
       // Do not silently re-hammer devices that already failed an explicit connect.
       if (status.state == DcsDeviceConnectionState.failed ||
           status.state == DcsDeviceConnectionState.unconfigured) {
         continue;
       }
-      unawaited(connect(profile.id, blockOnFailure: false));
+      unawaited(
+        connect(
+          profile.id,
+          settleBeforeFirst: _comSettleNeeded.contains(profile.id),
+          blockOnFailure: false,
+        ),
+      );
     }
   }
 
@@ -640,7 +675,7 @@ class DcsDeviceController {
       if (attempt > 1 || settleBeforeFirst) {
         final delay = attempt > 1
             ? _retryPolicy.delayForAttempt(attempt)
-            : const Duration(milliseconds: 300);
+            : const Duration(milliseconds: 1500);
         _setStatus(
           profile.id,
           attempt > 1
@@ -667,12 +702,9 @@ class DcsDeviceController {
 
       // Refresh discovery each attempt — power-cycled USB-serial often
       // reappears mid-retry after `_lastDiscovery` was cleared while absent.
-      var device = await _discoverProfile(profile);
-      // Explicit COM profiles may open by configured name even if the OS list
-      // briefly omits the port (common right after USB re-enumerate).
-      if (device == null) {
-        device = _syntheticComDevice(profile);
-      }
+      // Never open a synthetic COM name while the OS list omits the port —
+      // that yields ERROR_FILE_NOT_FOUND (2) and burns retries while powered off.
+      final device = await _discoverProfile(profile);
       if (cancelled()) {
         _setStatus(
           profile.id,
@@ -689,10 +721,11 @@ class DcsDeviceController {
         _setStatus(
           profile.id,
           DcsDeviceConnectionState.disconnected,
-          message: 'No matching ${profile.label} found.',
+          message: 'Waiting for ${profile.label}…',
           attempt: attempt,
           error: lastError,
         );
+        await Future<void>.delayed(const Duration(milliseconds: 1500));
         continue;
       }
 
@@ -727,6 +760,8 @@ class DcsDeviceController {
         _sessions[profile.id] = session;
         _attachData(profile.id, session);
         _startHealthCheck(profile.id, session);
+        _comOpenCooldownUntil.remove(profile.id);
+        _comSettleNeeded.remove(profile.id);
 
         _setStatus(
           profile.id,
@@ -750,8 +785,17 @@ class DcsDeviceController {
           data: {'attempt': attempt},
         );
         // Windows COM reopen often needs extra settle time after Access Denied.
-        if (_isAccessDenied(error) && attempt < _retryPolicy.maxAttempts) {
-          await Future<void>.delayed(Duration(milliseconds: 300 * attempt));
+        if (_isAccessDenied(error)) {
+          _comSettleNeeded.add(profile.id);
+          _comOpenCooldownUntil[profile.id] = DateTime.now().add(
+            Duration(milliseconds: 1500 * attempt),
+          );
+          if (attempt < _retryPolicy.maxAttempts) {
+            await Future<void>.delayed(Duration(milliseconds: 1500 * attempt));
+          }
+        } else if (_isPortMissing(error) &&
+            attempt < _retryPolicy.maxAttempts) {
+          await Future<void>.delayed(const Duration(milliseconds: 1500));
         }
       }
     }
@@ -790,18 +834,6 @@ class DcsDeviceController {
   ) async {
     final discoveries = await discover();
     return _bestMatch(profile, discoveries);
-  }
-
-  /// Configured COM port as a connect target when discovery has not listed it yet.
-  DcsDiscoveredDevice? _syntheticComDevice(DcsDeviceProfile profile) {
-    if (profile.connectionType != DcsConnectionType.com) return null;
-    final configuredPort = profile.comPort?.trim();
-    if (configuredPort == null || configuredPort.isEmpty) return null;
-    return DcsDiscoveredDevice(
-      id: 'serial:$configuredPort',
-      portName: configuredPort,
-      transport: DcsDeviceTransport.serial,
-    );
   }
 
   DcsDiscoveredDevice? _bestMatch(
@@ -975,7 +1007,14 @@ class DcsDeviceController {
         );
         await disconnect(profileId, allowAutoReconnect: true);
         if (_config.autoReconnect && !_closed) {
-          unawaited(connect(profileId, blockOnFailure: false));
+          _comSettleNeeded.add(profileId);
+          unawaited(
+            connect(
+              profileId,
+              settleBeforeFirst: true,
+              blockOnFailure: false,
+            ),
+          );
         }
       }
     });
@@ -1090,5 +1129,19 @@ class DcsDeviceController {
     }
     final text = error.toString().toLowerCase();
     return text.contains('access is denied') || text.contains('access denied');
+  }
+
+  static bool _isPortMissing(Object error) {
+    if (error is DcsDeviceConnectionException) {
+      if (error.code == 2) return true;
+      final lower = error.message.toLowerCase();
+      return lower.contains('cannot find the file') ||
+          lower.contains('system cannot find') ||
+          lower.contains('no such file');
+    }
+    final text = error.toString().toLowerCase();
+    return text.contains('cannot find the file') ||
+        text.contains('system cannot find') ||
+        text.contains('no such file');
   }
 }

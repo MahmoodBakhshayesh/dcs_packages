@@ -1,3 +1,11 @@
+## 0.2.13
+
+* Power-cycle reconnect: never open a synthetic COM name while the port is absent from the OS list (avoids
+  ERROR_FILE_NOT_FOUND burning retries while the device is off).
+* After a port **reappears**, settle ~1.5s before the first CreateFile; Access Denied (5) uses longer backoff +
+  a short open cooldown so the monitor does not re-hammer the driver mid-init.
+* Heartbeat / health recovery always settles before reopen; `reconnect` waits 800ms after close.
+
 ## 0.2.12
 
 * Standalone power-cycle reconnect: monitor / heartbeat recovery no longer permanently blocks auto-connect after
