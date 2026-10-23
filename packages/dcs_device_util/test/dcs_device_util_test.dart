@@ -146,6 +146,176 @@ void main() {
     await controller.dispose();
   });
 
+  test('recovery connect does not permanently block after power-off fails', () async {
+    const device = DcsDiscoveredDevice(
+      id: 'serial:COM9',
+      portName: 'COM9',
+      transport: DcsDeviceTransport.serial,
+    );
+    final adapter = _FakeAdapter(devices: [device], failConnects: 99);
+
+    final controller = DcsDeviceController(
+      initialConfig: DcsDeviceConfig(
+        profiles: [
+          DcsDeviceProfile(
+            id: 'bp',
+            label: 'BP',
+            role: DcsDeviceRole.boardingPassPrinter,
+            enabled: true,
+            matcher: const DcsDeviceMatcher(portName: 'COM9'),
+          ),
+        ],
+        autoReconnect: true,
+        discoveryInterval: const Duration(days: 1),
+      ),
+      adapters: [adapter],
+      retryPolicy: const DcsRetryPolicy(
+        maxAttempts: 2,
+        initialDelay: Duration(milliseconds: 1),
+        maxDelay: Duration(milliseconds: 1),
+      ),
+      healthPolicy: const DcsConnectionHealthPolicy(
+        heartbeatInterval: Duration(minutes: 1),
+      ),
+    );
+
+    // Simulate heartbeat/monitor recovery (blockOnFailure: false).
+    await controller.connect('bp', blockOnFailure: false);
+    expect(
+      controller.currentStatuses['bp']?.state,
+      DcsDeviceConnectionState.available,
+    );
+
+    // Device "comes back" — next recovery connect succeeds.
+    adapter.failConnects = 0;
+    await controller.connect('bp', blockOnFailure: false);
+    expect(
+      controller.currentStatuses['bp']?.state,
+      DcsDeviceConnectionState.connected,
+    );
+
+    await controller.dispose();
+  });
+
+  test('force connect cancels in-flight retry and reconnects', () async {
+    const device = DcsDiscoveredDevice(
+      id: 'serial:COM11',
+      portName: 'COM11',
+      transport: DcsDeviceTransport.serial,
+    );
+    final adapter = _FakeAdapter(devices: [device], failConnects: 99);
+
+    final controller = DcsDeviceController(
+      initialConfig: DcsDeviceConfig(
+        profiles: [
+          DcsDeviceProfile(
+            id: 'bp',
+            label: 'BP',
+            role: DcsDeviceRole.boardingPassPrinter,
+            enabled: true,
+            matcher: const DcsDeviceMatcher(portName: 'COM11'),
+          ),
+        ],
+        autoReconnect: false,
+      ),
+      adapters: [adapter],
+      retryPolicy: const DcsRetryPolicy(
+        maxAttempts: 8,
+        initialDelay: Duration(milliseconds: 80),
+        maxDelay: Duration(milliseconds: 80),
+      ),
+      healthPolicy: const DcsConnectionHealthPolicy(
+        heartbeatInterval: Duration(minutes: 1),
+      ),
+    );
+
+    // Start a long retry loop (do not await).
+    final stuck = controller.connect('bp');
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(controller.currentStatuses['bp']?.state, isNot(DcsDeviceConnectionState.connected));
+
+    adapter.failConnects = 0;
+    await controller.connect('bp', force: true);
+    expect(
+      controller.currentStatuses['bp']?.state,
+      DcsDeviceConnectionState.connected,
+    );
+
+    await stuck;
+    await controller.dispose();
+  });
+
+  test('discover forgets absent port and unblocks when it reappears', () async {
+    const device = DcsDiscoveredDevice(
+      id: 'serial:COM12',
+      portName: 'COM12',
+      transport: DcsDeviceTransport.serial,
+    );
+    final adapter = _FakeAdapter(devices: [device]);
+
+    final controller = DcsDeviceController(
+      initialConfig: DcsDeviceConfig(
+        profiles: [
+          DcsDeviceProfile(
+            id: 'bp',
+            label: 'BP',
+            role: DcsDeviceRole.boardingPassPrinter,
+            enabled: true,
+            matcher: const DcsDeviceMatcher(portName: 'COM12'),
+          ),
+        ],
+        autoReconnect: false,
+      ),
+      adapters: [adapter],
+      retryPolicy: const DcsRetryPolicy(
+        maxAttempts: 1,
+        initialDelay: Duration(milliseconds: 1),
+        maxDelay: Duration(milliseconds: 1),
+      ),
+      healthPolicy: const DcsConnectionHealthPolicy(
+        heartbeatInterval: Duration(minutes: 1),
+      ),
+    );
+
+    await controller.start(connect: false);
+    expect(
+      controller.currentStatuses['bp']?.state,
+      DcsDeviceConnectionState.available,
+    );
+
+    // Explicit connect fails → blocked.
+    adapter.failConnects = 5;
+    await controller.connect('bp');
+    expect(
+      controller.currentStatuses['bp']?.state,
+      DcsDeviceConnectionState.failed,
+    );
+
+    // Power off — configured COM must not stay "available" when absent.
+    adapter.devices = [];
+    await controller.discover();
+    expect(
+      controller.currentStatuses['bp']?.state,
+      DcsDeviceConnectionState.disconnected,
+    );
+
+    // Power on — reappears; auto-connect block from the earlier fail is cleared.
+    adapter.devices = [device];
+    adapter.failConnects = 0;
+    await controller.discover();
+    expect(
+      controller.currentStatuses['bp']?.state,
+      DcsDeviceConnectionState.available,
+    );
+    await controller.connect('bp', force: true);
+    expect(
+      controller.currentStatuses['bp']?.state,
+      DcsDeviceConnectionState.connected,
+    );
+
+    await controller.dispose();
+  });
+
   test('sends queued text request and classifies ok response', () async {
     final adapter = _FakeAdapter(
       devices: const [
@@ -451,10 +621,14 @@ void main() {
 }
 
 class _FakeAdapter implements DcsDeviceAdapter {
-  _FakeAdapter({this.devices = const [], this.failConnects = 0, this.onWrite});
+  _FakeAdapter({
+    List<DcsDiscoveredDevice> devices = const [],
+    this.failConnects = 0,
+    this.onWrite,
+  }) : devices = List<DcsDiscoveredDevice>.from(devices);
 
-  final List<DcsDiscoveredDevice> devices;
-  final int failConnects;
+  List<DcsDiscoveredDevice> devices;
+  int failConnects;
   final void Function(List<int> bytes, StreamController<List<int>> data)? onWrite;
 
   static int _instanceCounter = 0;
@@ -471,7 +645,7 @@ class _FakeAdapter implements DcsDeviceAdapter {
   @override
   Future<List<DcsDiscoveredDevice>> discover() async {
     _discoverCalls[_instanceId] = discoverCalls + 1;
-    return devices;
+    return List<DcsDiscoveredDevice>.from(devices);
   }
 
   @override

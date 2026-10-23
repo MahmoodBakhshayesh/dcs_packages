@@ -1,3 +1,15 @@
+## 0.2.12
+
+* Standalone power-cycle reconnect: monitor / heartbeat recovery no longer permanently blocks auto-connect after
+  retries fail while the device is off (ghost COM still listed).
+* Discover no longer synthesizes a COM match for a configured port that is **absent** from the OS list (that left
+  powered-off printers stuck on "available"). Connect may still open by configured name as a last resort.
+* Discover forgets stale ports when a match disappears; clears the auto-connect block only when a device
+  **reappears**; does not overwrite connecting/retrying with "available".
+* Explicit `connect(force: true)` cancels an in-flight retry loop, settles the COM handle, and rediscovers each
+  attempt — UI Connect works after a stuck retrying/fail loop.
+* `reconnect` uses `connect(force: true)`.
+
 ## 0.2.11
 
 * Request-queue observability: `DcsQueueState` (`waiting` / `running` / `depth`), `DcsDeviceRequestQueue.state` /

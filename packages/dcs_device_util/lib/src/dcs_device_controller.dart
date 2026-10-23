@@ -171,7 +171,11 @@ class DcsDeviceController {
     )) {
       final match = _bestMatch(profile, discoveries);
       if (match == null) {
-        if (!_sessions.containsKey(profile.id)) {
+        // Forget the stale port so reconnect does not open a dead COM handle
+        // after the device is powered off / unplugged.
+        _lastDiscovery.remove(profile.id);
+        if (!_sessions.containsKey(profile.id) &&
+            !_connecting.contains(profile.id)) {
           _setStatus(
             profile.id,
             DcsDeviceConnectionState.disconnected,
@@ -181,16 +185,29 @@ class DcsDeviceController {
         continue;
       }
 
+      final wasAbsent = !_lastDiscovery.containsKey(profile.id);
       _lastDiscovery[profile.id] = match;
-      if (!_sessions.containsKey(profile.id)) {
-        _setStatus(
-          profile.id,
-          DcsDeviceConnectionState.available,
-          message: '${profile.label} found on ${match.portName}.',
-          device: match,
-          clearError: true,
-        );
+      if (_sessions.containsKey(profile.id)) continue;
+
+      // Do not clobber an in-flight connect/retry UI with "available".
+      final current = _statuses[profile.id];
+      final inFlight = _connecting.contains(profile.id) ||
+          current?.state == DcsDeviceConnectionState.connecting ||
+          current?.state == DcsDeviceConnectionState.retrying;
+      if (inFlight) continue;
+
+      // Only unblock auto-connect when the device newly reappears (power cycle).
+      // Keep the block after Access Denied while the port is still listed.
+      if (wasAbsent) {
+        _autoConnectBlocked.remove(profile.id);
       }
+      _setStatus(
+        profile.id,
+        DcsDeviceConnectionState.available,
+        message: '${profile.label} found on ${match.portName}.',
+        device: match,
+        clearError: true,
+      );
     }
 
     _log(
@@ -221,8 +238,35 @@ class DcsDeviceController {
     );
   }
 
-  Future<void> connect(String profileId) async {
+  /// Opens [profileId] with retry.
+  ///
+  /// Pass [force] for an explicit UI "Connect" — cancels any in-flight retry
+  /// loop and settles the COM handle before reopening (avoids Access Denied
+  /// after a power cycle / failed reopen race).
+  ///
+  /// Pass [blockOnFailure] `false` for monitor / heartbeat recovery so a
+  /// temporary power-off does not permanently stick the device on "available".
+  Future<void> connect(
+    String profileId, {
+    bool force = false,
+    bool blockOnFailure = true,
+  }) async {
     _ensureOpen();
+
+    if (_sessions.containsKey(profileId)) {
+      if (!force) return;
+      await disconnect(profileId, allowAutoReconnect: false);
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+    } else if (_connecting.contains(profileId)) {
+      if (!force) return;
+      // Cancel the stuck retry loop, wait for it to exit, then settle.
+      _connectEpoch[profileId] = (_connectEpoch[profileId] ?? 0) + 1;
+      for (var i = 0; i < 100 && _connecting.contains(profileId); i += 1) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+    }
+
     if (_sessions.containsKey(profileId) || _connecting.contains(profileId)) {
       return;
     }
@@ -261,7 +305,12 @@ class DcsDeviceController {
     final epoch = _connectEpoch[profileId] ?? 0;
     _connecting.add(profileId);
     try {
-      await _connectWithRetry(profile, epoch: epoch);
+      await _connectWithRetry(
+        profile,
+        epoch: epoch,
+        settleBeforeFirst: force,
+        blockOnFailure: blockOnFailure,
+      );
     } finally {
       _connecting.remove(profileId);
     }
@@ -283,7 +332,7 @@ class DcsDeviceController {
     await disconnect(profileId, allowAutoReconnect: false);
     await Future<void>.delayed(const Duration(milliseconds: 400));
     await discover();
-    await connect(profileId);
+    await connect(profileId, force: true);
   }
 
   /// Disconnects [profileId] and cancels any in-flight connect/retry for it.
@@ -546,7 +595,7 @@ class DcsDeviceController {
           );
           await disconnect(profile.id, allowAutoReconnect: true);
           if (_config.autoReconnect && !_closed) {
-            unawaited(connect(profile.id));
+            unawaited(connect(profile.id, blockOnFailure: false));
           }
         }
         continue;
@@ -561,13 +610,15 @@ class DcsDeviceController {
           status.state == DcsDeviceConnectionState.unconfigured) {
         continue;
       }
-      unawaited(connect(profile.id));
+      unawaited(connect(profile.id, blockOnFailure: false));
     }
   }
 
   Future<void> _connectWithRetry(
     DcsDeviceProfile profile, {
     required int epoch,
+    bool settleBeforeFirst = false,
+    bool blockOnFailure = true,
   }) async {
     Object? lastError;
     StackTrace? lastStackTrace;
@@ -586,12 +637,18 @@ class DcsDeviceController {
         return;
       }
 
-      if (attempt > 1) {
-        final delay = _retryPolicy.delayForAttempt(attempt);
+      if (attempt > 1 || settleBeforeFirst) {
+        final delay = attempt > 1
+            ? _retryPolicy.delayForAttempt(attempt)
+            : const Duration(milliseconds: 300);
         _setStatus(
           profile.id,
-          DcsDeviceConnectionState.retrying,
-          message: 'Retrying ${profile.label} in ${delay.inMilliseconds}ms.',
+          attempt > 1
+              ? DcsDeviceConnectionState.retrying
+              : DcsDeviceConnectionState.connecting,
+          message: attempt > 1
+              ? 'Retrying ${profile.label} in ${delay.inMilliseconds}ms.'
+              : 'Waiting for ${profile.label} port to settle…',
           attempt: attempt,
         );
         await Future<void>.delayed(delay);
@@ -604,10 +661,18 @@ class DcsDeviceController {
           );
           return;
         }
+        // Only settle once before the first open.
+        settleBeforeFirst = false;
       }
 
-      final device =
-          _lastDiscovery[profile.id] ?? await _discoverProfile(profile);
+      // Refresh discovery each attempt — power-cycled USB-serial often
+      // reappears mid-retry after `_lastDiscovery` was cleared while absent.
+      var device = await _discoverProfile(profile);
+      // Explicit COM profiles may open by configured name even if the OS list
+      // briefly omits the port (common right after USB re-enumerate).
+      if (device == null) {
+        device = _syntheticComDevice(profile);
+      }
       if (cancelled()) {
         _setStatus(
           profile.id,
@@ -691,13 +756,25 @@ class DcsDeviceController {
       }
     }
 
-    _autoConnectBlocked.add(profile.id);
+    if (blockOnFailure) {
+      _autoConnectBlocked.add(profile.id);
+    }
+    final stillListed = _lastDiscovery.containsKey(profile.id);
     _setStatus(
       profile.id,
-      DcsDeviceConnectionState.failed,
-      message: 'Could not connect ${profile.label}.',
+      blockOnFailure
+          ? DcsDeviceConnectionState.failed
+          : stillListed
+              ? DcsDeviceConnectionState.available
+              : DcsDeviceConnectionState.disconnected,
+      message: blockOnFailure
+          ? 'Could not connect ${profile.label}.'
+          : stillListed
+              ? '${profile.label} available — will retry.'
+              : 'No matching ${profile.label} found.',
       attempt: _retryPolicy.maxAttempts,
       error: lastError,
+      device: _lastDiscovery[profile.id],
     );
     _log(
       DcsLogLevel.error,
@@ -713,6 +790,18 @@ class DcsDeviceController {
   ) async {
     final discoveries = await discover();
     return _bestMatch(profile, discoveries);
+  }
+
+  /// Configured COM port as a connect target when discovery has not listed it yet.
+  DcsDiscoveredDevice? _syntheticComDevice(DcsDeviceProfile profile) {
+    if (profile.connectionType != DcsConnectionType.com) return null;
+    final configuredPort = profile.comPort?.trim();
+    if (configuredPort == null || configuredPort.isEmpty) return null;
+    return DcsDiscoveredDevice(
+      id: 'serial:$configuredPort',
+      portName: configuredPort,
+      transport: DcsDeviceTransport.serial,
+    );
   }
 
   DcsDiscoveredDevice? _bestMatch(
@@ -750,6 +839,8 @@ class DcsDeviceController {
 
     // Prefer an exact configured COM port before fuzzy manufacturer matching.
     // (Substring port match used to bind COM4 → COM44.)
+    // Do NOT synthesize a match when the port is absent — that left powered-off
+    // devices stuck on "available" and blocked real reconnect after power cycle.
     final configuredPort = profile.comPort?.trim();
     if (configuredPort != null && configuredPort.isNotEmpty) {
       final wanted = configuredPort.toUpperCase();
@@ -759,11 +850,7 @@ class DcsDeviceController {
           return device;
         }
       }
-      return DcsDiscoveredDevice(
-        id: 'serial:$configuredPort',
-        portName: configuredPort,
-        transport: DcsDeviceTransport.serial,
-      );
+      return null;
     }
 
     for (final device in discoveries) {
@@ -888,7 +975,7 @@ class DcsDeviceController {
         );
         await disconnect(profileId, allowAutoReconnect: true);
         if (_config.autoReconnect && !_closed) {
-          unawaited(connect(profileId));
+          unawaited(connect(profileId, blockOnFailure: false));
         }
       }
     });
