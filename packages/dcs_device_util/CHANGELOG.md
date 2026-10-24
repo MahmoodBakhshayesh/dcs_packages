@@ -1,3 +1,12 @@
+## 0.2.14
+
+* **Fix power-cycle Access Denied:** ping/write paths that marked a serial session dead used to skip
+  `SerialPort.close()` / `dispose()` on the next `close()` (`if (_closed) return`). Windows kept the COM
+  handle in-process → ERROR_ACCESS_DENIED (5) on every reopen. Release is now always idempotent.
+* Waiting while the COM port is **absent** no longer burns open-attempt budget; settle after reappear is
+  ~2.5s; Access Denied backoff 3–15s; monitor keeps retrying after Access Denied (blockOnFailure: false).
+* Discover no longer overwrites in-flight connecting/retrying with "discovering".
+
 ## 0.2.13
 
 * Power-cycle reconnect: never open a synthetic COM name while the port is absent from the OS list (avoids

@@ -148,6 +148,13 @@ class DcsDeviceController {
       (profile) => profile.enabled,
     )) {
       if (_sessions.containsKey(profile.id)) continue;
+      // Do not clobber an in-flight connect/retry with "discovering".
+      if (_connecting.contains(profile.id)) continue;
+      final st = _statuses[profile.id]?.state;
+      if (st == DcsDeviceConnectionState.connecting ||
+          st == DcsDeviceConnectionState.retrying) {
+        continue;
+      }
       _setStatus(
         profile.id,
         DcsDeviceConnectionState.discovering,
@@ -262,7 +269,7 @@ class DcsDeviceController {
     if (_sessions.containsKey(profileId)) {
       if (!force) return;
       await disconnect(profileId, allowAutoReconnect: false);
-      await Future<void>.delayed(const Duration(milliseconds: 800));
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
     } else if (_connecting.contains(profileId)) {
       if (!force) return;
       // Cancel the stuck retry loop, wait for it to exit, then settle.
@@ -270,7 +277,7 @@ class DcsDeviceController {
       for (var i = 0; i < 100 && _connecting.contains(profileId); i += 1) {
         await Future<void>.delayed(const Duration(milliseconds: 50));
       }
-      await Future<void>.delayed(const Duration(milliseconds: 800));
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
     }
 
     if (_sessions.containsKey(profileId) || _connecting.contains(profileId)) {
@@ -348,7 +355,7 @@ class DcsDeviceController {
     // Block monitor auto-connect while we settle the COM handle — Windows often
     // returns ERROR_ACCESS_DENIED (5) if reopen races the previous close.
     await disconnect(profileId, allowAutoReconnect: false);
-    await Future<void>.delayed(const Duration(milliseconds: 800));
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
     await discover();
     await connect(profileId, force: true, settleBeforeFirst: true);
   }
@@ -661,30 +668,37 @@ class DcsDeviceController {
     bool cancelled() =>
         _closed || (_connectEpoch[profile.id] ?? 0) != epoch;
 
-    for (var attempt = 1; attempt <= _retryPolicy.maxAttempts; attempt += 1) {
+    // Open attempts only count CreateFile / connect failures — waiting while the
+    // port is absent (power off) must not burn the budget (log 2026-10-24).
+    var openAttempt = 0;
+    var waitedAbsent = false;
+    final deadline = DateTime.now().add(const Duration(minutes: 2));
+
+    while (openAttempt < _retryPolicy.maxAttempts) {
       if (cancelled()) {
         _setStatus(
           profile.id,
           DcsDeviceConnectionState.disconnected,
           message: 'Connect cancelled.',
-          attempt: attempt,
+          attempt: openAttempt,
         );
         return;
       }
+      if (DateTime.now().isAfter(deadline)) break;
 
-      if (attempt > 1 || settleBeforeFirst) {
-        final delay = attempt > 1
-            ? _retryPolicy.delayForAttempt(attempt)
-            : const Duration(milliseconds: 1500);
+      if (settleBeforeFirst || (openAttempt > 0 && !waitedAbsent)) {
+        final delay = openAttempt > 0
+            ? _retryPolicy.delayForAttempt(openAttempt + 1)
+            : const Duration(milliseconds: 2500);
         _setStatus(
           profile.id,
-          attempt > 1
+          openAttempt > 0
               ? DcsDeviceConnectionState.retrying
               : DcsDeviceConnectionState.connecting,
-          message: attempt > 1
+          message: openAttempt > 0
               ? 'Retrying ${profile.label} in ${delay.inMilliseconds}ms.'
               : 'Waiting for ${profile.label} port to settle…',
-          attempt: attempt,
+          attempt: openAttempt + 1,
         );
         await Future<void>.delayed(delay);
         if (cancelled()) {
@@ -692,13 +706,13 @@ class DcsDeviceController {
             profile.id,
             DcsDeviceConnectionState.disconnected,
             message: 'Connect cancelled.',
-            attempt: attempt,
+            attempt: openAttempt,
           );
           return;
         }
-        // Only settle once before the first open.
         settleBeforeFirst = false;
       }
+      waitedAbsent = false;
 
       // Refresh discovery each attempt — power-cycled USB-serial often
       // reappears mid-retry after `_lastDiscovery` was cleared while absent.
@@ -710,7 +724,7 @@ class DcsDeviceController {
           profile.id,
           DcsDeviceConnectionState.disconnected,
           message: 'Connect cancelled.',
-          attempt: attempt,
+          attempt: openAttempt,
         );
         return;
       }
@@ -722,19 +736,44 @@ class DcsDeviceController {
           profile.id,
           DcsDeviceConnectionState.disconnected,
           message: 'Waiting for ${profile.label}…',
-          attempt: attempt,
+          attempt: openAttempt,
           error: lastError,
         );
+        waitedAbsent = true;
         await Future<void>.delayed(const Duration(milliseconds: 1500));
         continue;
       }
 
+      // Port just reappeared after absence — give the USB-serial driver time
+      // before CreateFile (Access Denied otherwise).
+      if (_comSettleNeeded.remove(profile.id) || settleBeforeFirst) {
+        settleBeforeFirst = false;
+        _setStatus(
+          profile.id,
+          DcsDeviceConnectionState.connecting,
+          message: 'Waiting for ${profile.label} port to settle…',
+          attempt: openAttempt + 1,
+          device: device,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 2500));
+        if (cancelled()) {
+          _setStatus(
+            profile.id,
+            DcsDeviceConnectionState.disconnected,
+            message: 'Connect cancelled.',
+            attempt: openAttempt,
+          );
+          return;
+        }
+      }
+
+      openAttempt += 1;
       try {
         _setStatus(
           profile.id,
           DcsDeviceConnectionState.connecting,
           message: 'Connecting ${profile.label} on ${device.portName}.',
-          attempt: attempt,
+          attempt: openAttempt,
           device: device,
           clearError: true,
         );
@@ -753,7 +792,7 @@ class DcsDeviceController {
             profile.id,
             DcsDeviceConnectionState.disconnected,
             message: 'Connect cancelled.',
-            attempt: attempt,
+            attempt: openAttempt,
           );
           return;
         }
@@ -767,7 +806,7 @@ class DcsDeviceController {
           profile.id,
           DcsDeviceConnectionState.connected,
           message: '${profile.label} connected on ${device.portName}.',
-          attempt: attempt,
+          attempt: openAttempt,
           device: device,
           clearError: true,
         );
@@ -782,26 +821,34 @@ class DcsDeviceController {
           profileId: profile.id,
           error: error,
           stackTrace: stackTrace,
-          data: {'attempt': attempt},
+          data: {'attempt': openAttempt},
         );
         // Windows COM reopen often needs extra settle time after Access Denied.
         if (_isAccessDenied(error)) {
           _comSettleNeeded.add(profile.id);
+          final backoffMs = (3000 * openAttempt).clamp(3000, 15000);
           _comOpenCooldownUntil[profile.id] = DateTime.now().add(
-            Duration(milliseconds: 1500 * attempt),
+            Duration(milliseconds: backoffMs),
           );
-          if (attempt < _retryPolicy.maxAttempts) {
-            await Future<void>.delayed(Duration(milliseconds: 1500 * attempt));
+          if (openAttempt < _retryPolicy.maxAttempts) {
+            await Future<void>.delayed(Duration(milliseconds: backoffMs));
           }
         } else if (_isPortMissing(error) &&
-            attempt < _retryPolicy.maxAttempts) {
-          await Future<void>.delayed(const Duration(milliseconds: 1500));
+            openAttempt < _retryPolicy.maxAttempts) {
+          await Future<void>.delayed(const Duration(milliseconds: 2000));
         }
       }
     }
 
     if (blockOnFailure) {
       _autoConnectBlocked.add(profile.id);
+    } else if (lastError != null && _isAccessDenied(lastError)) {
+      // Keep trying from the monitor — Access Denied after power cycle can
+      // last well beyond one retry budget; do not look "stuck available".
+      _comSettleNeeded.add(profile.id);
+      _comOpenCooldownUntil[profile.id] = DateTime.now().add(
+        const Duration(seconds: 5),
+      );
     }
     final stillListed = _lastDiscovery.containsKey(profile.id);
     _setStatus(
@@ -816,7 +863,7 @@ class DcsDeviceController {
           : stillListed
               ? '${profile.label} available — will retry.'
               : 'No matching ${profile.label} found.',
-      attempt: _retryPolicy.maxAttempts,
+      attempt: openAttempt,
       error: lastError,
       device: _lastDiscovery[profile.id],
     );

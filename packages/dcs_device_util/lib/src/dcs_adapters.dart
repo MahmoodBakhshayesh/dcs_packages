@@ -226,7 +226,7 @@ class _DcsSerialPortSession implements DcsDeviceSession {
 
     while (offset < data.length) {
       if (!_port.isOpen) {
-        _closed = true;
+        _markDead();
         throw DcsDeviceConnectionException(
           'Serial port ${_port.name} closed during write '
           '(offset $offset of ${data.length}).',
@@ -247,14 +247,14 @@ class _DcsSerialPortSession implements DcsDeviceSession {
       try {
         written = _port.write(chunk, timeout: timeoutMs);
       } catch (error) {
-        _closed = true;
+        _markDead();
         throw DcsDeviceConnectionException(
           'Serial write failed on ${_port.name}: $error',
         );
       }
       if (written < 0) {
         final error = SerialPort.lastError;
-        _closed = true;
+        _markDead();
         throw DcsDeviceConnectionException(
           'Serial write failed on ${_port.name}: '
           '${error?.message ?? 'unknown serial error'}',
@@ -283,7 +283,7 @@ class _DcsSerialPortSession implements DcsDeviceSession {
       _port.bytesAvailable;
       final _ = _port.config;
     } catch (error) {
-      _closed = true;
+      _markDead();
       throw DcsDeviceConnectionException(
         'Serial port ${_port.name} is no longer healthy: $error',
       );
@@ -296,22 +296,48 @@ class _DcsSerialPortSession implements DcsDeviceSession {
     final available = SerialPort.availablePorts;
     final present = available.any((p) => p.trim().toUpperCase() == name.toUpperCase());
     if (!present) {
-      _closed = true;
+      _markDead();
       throw DcsDeviceConnectionException(
         'Serial port $name is no longer available (device unplugged or powered off).',
       );
     }
   }
 
+  /// Marks the session dead. Does **not** release the OS handle — call [close].
+  ///
+  /// Previously error paths set `_closed = true` and [close] then returned early
+  /// without `port.close()` / `dispose()`, so Windows kept ERROR_ACCESS_DENIED (5)
+  /// on the next CreateFile after a power cycle.
+  void _markDead() {
+    _closed = true;
+  }
+
+  var _released = false;
+
+  /// Always release the COM handle, even if a prior ping/write already marked
+  /// the session dead. Idempotent.
   @override
   Future<void> close() async {
-    if (_closed) return;
     _closed = true;
-    await _dataSubscription.cancel();
-    _reader.close();
-    _port.close();
-    _port.dispose();
-    await _dataController.close();
+    if (_released) return;
+    _released = true;
+    try {
+      await _dataSubscription.cancel();
+    } catch (_) {}
+    try {
+      _reader.close();
+    } catch (_) {}
+    try {
+      if (_port.isOpen) {
+        _port.close();
+      }
+    } catch (_) {}
+    try {
+      _port.dispose();
+    } catch (_) {}
+    if (!_dataController.isClosed) {
+      await _dataController.close();
+    }
   }
 }
 
@@ -368,13 +394,22 @@ class _DcsNetworkSession implements DcsDeviceSession {
     }
   }
 
+  var _released = false;
+
   @override
   Future<void> close() async {
-    if (_closed) return;
     _closed = true;
-    await _dataSubscription.cancel();
-    await _socket.close();
-    await _dataController.close();
+    if (_released) return;
+    _released = true;
+    try {
+      await _dataSubscription.cancel();
+    } catch (_) {}
+    try {
+      await _socket.close();
+    } catch (_) {}
+    if (!_dataController.isClosed) {
+      await _dataController.close();
+    }
   }
 }
 
