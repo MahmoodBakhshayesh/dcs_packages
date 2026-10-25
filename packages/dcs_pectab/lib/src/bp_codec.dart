@@ -16,8 +16,13 @@ abstract final class BpCodec {
       return UnknownElement(itemNo: itemNo, source: source);
     }
 
-    if (rest[0].toUpperCase() == 'B') {
-      return _parseBarcode(itemNo, source, rest.substring(1)) ?? UnknownElement(itemNo: itemNo, source: source);
+    // AEA 4.3: `B` or `X` introduces a barcode.
+    final marker = rest[0].toUpperCase();
+    if (marker == 'B' || marker == 'X') {
+      final barcode =
+          _parseBarcode(itemNo, source, rest.substring(1)) ?? _parseSpecBarcode(itemNo, source, rest.substring(1));
+      if (barcode == null) return UnknownElement(itemNo: itemNo, source: source);
+      return barcode..marker = marker;
     }
 
     if (rest.length < 2 || !_isDigit(rest[0]) || !_isDigit(rest[1])) {
@@ -73,7 +78,8 @@ abstract final class BpCodec {
         style = tail.toUpperCase() == 'L' ? BpStyle.small : BpStyle.bold;
       } else if (tail.isNotEmpty) {
         // Steering (and optional trailing style letter).
-        if (tail.length > 1 && (tail[tail.length - 1].toUpperCase() == 'L' || tail[tail.length - 1].toUpperCase() == 'R')) {
+        if (tail.length > 1 &&
+            (tail[tail.length - 1].toUpperCase() == 'L' || tail[tail.length - 1].toUpperCase() == 'R')) {
           style = tail[tail.length - 1].toUpperCase() == 'L' ? BpStyle.small : BpStyle.bold;
           steeringCmd = tail.substring(0, tail.length - 1);
         } else {
@@ -97,10 +103,17 @@ abstract final class BpCodec {
     final short = _parseShortBarcode(itemNo, source, afterB);
     if (short != null) return short;
     var rem = afterB;
-    var rotate180 = false;
-    if (rem.isNotEmpty && rem[0].toUpperCase() == 'R') {
-      rotate180 = true;
-      rem = rem.substring(1);
+    // L = 90°, R = 180° (AEA manual R; L extended so Rotate can step 90°).
+    var rotationDeg = 0;
+    if (rem.isNotEmpty) {
+      final o = rem[0].toUpperCase();
+      if (o == 'R') {
+        rotationDeg = 180;
+        rem = rem.substring(1);
+      } else if (o == 'L') {
+        rotationDeg = 90;
+        rem = rem.substring(1);
+      }
     }
     // type(1) + row(1) + col(2) + hh(2) + ecc(1) + hri(1)
     if (rem.length != 8) return null;
@@ -127,8 +140,46 @@ abstract final class BpCodec {
       heightMm: heightMm,
       ecc: int.parse(eccCh),
       hri: int.parse(hriCh),
-      rotate180: rotate180,
+      rotationDeg: rotationDeg,
     );
+  }
+
+  /// `pectab-setup.md` §8 form: type (alphanumeric) + one or two cells + height(2) + ECC(1) + module(1), e.g.
+  /// `FABRC012232` (type `R`, cell C01). Tried after the manual / web forms so their parses never change.
+  static BpBarcode? _parseSpecBarcode(String itemNo, String source, String afterB) {
+    final m = RegExp(r'^([0-9A-Za-z])((?:[A-Ra-r]\d{2}){1,2})(\d{2})(\d)(\d)$').firstMatch(afterB);
+    if (m == null) return null;
+    final cells = m.group(2)!;
+    BpPos? cell(int at) {
+      final col = int.parse(cells.substring(at + 1, at + 3));
+      if (col < 1 || col > 72) return null;
+      return BpPos(row: cells[at].toUpperCase(), col: col);
+    }
+
+    final pos = cell(0);
+    final pos2 = cells.length == 6 ? cell(3) : null;
+    if (pos == null || (cells.length == 6 && pos2 == null)) return null;
+    final typeCode = m.group(1)!;
+    return BpBarcode(
+      itemNo: itemNo,
+      source: source,
+      type: BpBarcodeType.fromCode(typeCode),
+      typeCode: typeCode,
+      pos: pos,
+      pos2: pos2,
+      heightMm: int.parse(m.group(3)!),
+      ecc: int.parse(m.group(4)!),
+      hri: int.parse(m.group(5)!),
+    );
+  }
+
+  /// BP literal word after the item no (`50PASSENGER`) — printed as a label. Null for any other element.
+  static String? literalOf(PectabElement el) {
+    if (el is! UnknownElement || el.source.length < 3) return null;
+    final rest = el.source.substring(2);
+    final first = rest[0].toUpperCase();
+    if (first == 'B' || first == 'X') return null;
+    return RegExp(r'^[A-Z][A-Z .:/&-]*$').hasMatch(rest) ? rest : null;
   }
 
   /// Web-designer form: `B` + optional `R`/`L` + row + col(2) + width(2) + height(2), PDF417.
@@ -137,6 +188,12 @@ abstract final class BpCodec {
     if (m == null) return null;
     final col = int.parse(m.group(3)!);
     if (col < 1 || col > 72) return null;
+    final orient = m.group(1)!.toUpperCase();
+    final rotationDeg = switch (orient) {
+      'R' => 90,
+      'L' => 270,
+      _ => 0,
+    };
     return BpBarcode(
       itemNo: itemNo,
       source: source,
@@ -146,9 +203,9 @@ abstract final class BpCodec {
       heightMm: int.parse(m.group(5)!),
       ecc: 0,
       hri: 0,
-      rotate180: false,
+      rotationDeg: rotationDeg,
       shortWidth: m.group(4),
-      shortOrient: m.group(1)!.toUpperCase(),
+      shortOrient: orient,
     );
   }
 

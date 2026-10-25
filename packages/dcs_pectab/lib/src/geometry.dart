@@ -114,7 +114,7 @@ abstract final class PectabGeometry {
       ax: (e.pos.col - 1) * bpCellW,
       ay: bottom,
       local: MmRect(left: 0, top: -h, width: w, height: h),
-      rotationDeg: e.rotate180 ? 180 : 0,
+      rotationDeg: e.rotationDeg,
       rotateAboutCentre: true,
     );
   }

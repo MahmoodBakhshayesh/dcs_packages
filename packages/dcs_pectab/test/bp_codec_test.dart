@@ -65,11 +65,19 @@ void main() {
     test('rotate 180 (R after B)', () {
       final e = BpCodec.parseElement('FBBR6D012259') as BpBarcode;
       expect(e.rotate180, isTrue);
+      expect(e.rotationDeg, 180);
       expect(e.typeCode, '6');
       expect(e.pos, BpPos(row: 'D', col: 1));
       expect(e.heightMm, 22);
       expect(e.ecc, 5);
       expect(e.hri, 9);
+    });
+
+    test('rotate 90 (L after B)', () {
+      final e = BpCodec.parseElement('FABL6Q252033') as BpBarcode;
+      expect(e.rotationDeg, 90);
+      expect(e.rotate180, isFalse);
+      expect(e.serializeEdited(), 'FABL6Q252033');
     });
 
     test('type table', () {

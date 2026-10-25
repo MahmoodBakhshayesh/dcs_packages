@@ -1,3 +1,15 @@
+## 0.1.5
+
+* BP barcodes: `X` marker (AEA 4.3) as well as `B`, kept on rewrite (`marker`); optional second cell (`pos2`);
+  `pectab-setup.md` §8 form with an alphanumeric type (`FABRC01D022232` = type `R`, cells C01 + D02) tried
+  after the manual / web forms, so their parses are unchanged (`FABRC012232` still reads as the web short form).
+* `BpCodec.literalOf` — BP literal word in the table (`50PASSENGER`), still kept verbatim as `UnknownElement`.
+
+## 0.1.4
+
+* BP barcode rotation is `rotationDeg` (0 / 90 / 180 / 270), stepped ±90° in the builder. Long form: `L` = 90°,
+  `R` = 180° (AEA). Short form: `R` = 90°, `L` = 270° (web). `rotate180` remains as a getter/setter for 180°.
+
 ## 0.1.3
 
 * Paste cleanup: line breaks and a short label before the preamble (`copied: BTT1039…`) are dropped before parsing;

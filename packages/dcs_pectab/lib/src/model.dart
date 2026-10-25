@@ -285,10 +285,19 @@ final class BpBarcode extends PectabElement {
     required this.heightMm,
     required this.ecc,
     required this.hri,
-    required this.rotate180,
+    int? rotationDeg,
+    @Deprecated('Use rotationDeg') bool rotate180 = false,
     this.shortWidth,
     this.shortOrient = '',
-  });
+    this.marker = 'B',
+    this.pos2,
+  }) : rotationDeg = _normRot(rotationDeg ?? (rotate180 ? 180 : 0));
+
+  /// `B` or `X` — the AEA letter that introduced the barcode; kept on rewrite.
+  String marker;
+
+  /// Optional second print cell (`pectab-setup.md` §8: one or two `row+col`).
+  BpPos? pos2;
 
   BpBarcodeType type;
 
@@ -298,7 +307,14 @@ final class BpBarcode extends PectabElement {
   int heightMm;
   int ecc;
   int hri;
-  bool rotate180;
+
+  /// Clockwise barcode rotation in degrees: 0, 90, 180, or 270.
+  int rotationDeg;
+
+  /// Legacy: true when [rotationDeg] is 180.
+  bool get rotate180 => rotationDeg == 180;
+
+  set rotate180(bool value) => rotationDeg = value ? 180 : (rotationDeg == 180 ? 0 : rotationDeg);
 
   /// Short (web-designer) form `B[R|L]{row}{col}{ww}{hh}` — width code; null for the manual form.
   String? shortWidth;
@@ -306,15 +322,38 @@ final class BpBarcode extends PectabElement {
   /// Short form orientation letter (`''`, `R`, `L`) — kept verbatim.
   String shortOrient;
 
+  static int _normRot(int deg) {
+    final d = deg % 360;
+    final n = d < 0 ? d + 360 : d;
+    if (n == 90 || n == 180 || n == 270) return n;
+    return 0;
+  }
+
+  /// Orientation letter for the long (manual) form: L=90°, R=180°, empty=0° (270° → L).
+  String get _longOrientLetter => switch (rotationDeg) {
+        90 || 270 => 'L',
+        180 => 'R',
+        _ => '',
+      };
+
   @override
   String serializeEdited() {
     final hh = heightMm.toString().padLeft(2, '0');
-    if (shortWidth != null) return '${itemNo}B$shortOrient$pos$shortWidth$hh';
+    if (shortWidth != null) {
+      final orient = switch (rotationDeg) {
+        90 => 'R',
+        270 => 'L',
+        180 => 'R',
+        _ => shortOrient,
+      };
+      return '$itemNo$marker$orient$pos$shortWidth$hh';
+    }
     return '$itemNo'
-        'B'
-        '${rotate180 ? 'R' : ''}'
+        '$marker'
+        '$_longOrientLetter'
         '$typeCode'
         '$pos'
+        '${pos2 ?? ''}'
         '$hh'
         '$ecc'
         '$hri';
