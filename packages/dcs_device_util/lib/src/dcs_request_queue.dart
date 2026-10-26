@@ -95,8 +95,11 @@ class DcsDeviceRequestOptions {
         normalized.contains('ERROR')) {
       return true;
     }
-    // Token ERR\d (ERR5, ERR6, ERR7) — not ERR3IGN / ERR5PRT param names.
-    return RegExp(r'(^|[^A-Z0-9])ERR\d([^A-Z]|$)').hasMatch(normalized);
+    // AEA ERR\d (ERR3/5/6/7…). Print-steering can prefix the code
+    // (`CHKINERR3`, `TICKTERR2`, `BOARDERR6`) — do not require a non-alnum
+    // boundary before ERR. Strip EP params ERR3IGN / ERR5PRT first.
+    final withoutParams = normalized.replaceAll(RegExp(r'ERR\d(?:IGN|PRT)'), '');
+    return RegExp(r'ERR\d').hasMatch(withoutParams);
   }
 }
 

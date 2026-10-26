@@ -512,6 +512,26 @@ void main() {
     expect(DcsDeviceRequestOptions.isBusyError('HDCERR6'), isFalse);
   });
 
+  test('classifies steering-prefixed ERR3 as error (not unknown)', () {
+    // Multi-PECTAB BP: response may use TICKT/CHKIN/BOARD prefix instead of HDC.
+    const chkin = 'CHKINERR3#100#200#300#VSR#46@40';
+    expect(
+      DcsDeviceRequestOptions.defaultClassifier(Uint8List.fromList(chkin.codeUnits), chkin),
+      DcsDeviceResponseStatus.error,
+    );
+    const tickt = 'TICKTERR6';
+    expect(
+      DcsDeviceRequestOptions.defaultClassifier(Uint8List.fromList(tickt.codeUnits), tickt),
+      DcsDeviceResponseStatus.error,
+    );
+    // EP params must still look like success.
+    const ep = 'HDCEPOK#AIRLINEID=119#ERR3IGN=N#ERR5PRT=Y';
+    expect(
+      DcsDeviceRequestOptions.defaultClassifier(Uint8List.fromList(ep.codeUnits), ep),
+      DcsDeviceResponseStatus.ok,
+    );
+  });
+
   test('fire-and-forget write still frames outbound', () async {
     List<int>? written;
     final session = _FakeSession(

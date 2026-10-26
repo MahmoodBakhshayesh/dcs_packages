@@ -1,3 +1,9 @@
+## 0.2.15
+
+* Response classifier: print-steering prefixes (`CHKINERR3`, `TICKTERR6`, `BOARDERR2`, …) are hard errors.
+  The previous `(^|[^A-Z0-9])ERR\d` boundary left those as `unknown` because a letter sat before `ERR`.
+  EP params `ERR3IGN` / `ERR5PRT` are still stripped so `HDCEPOK#…` stays OK.
+
 ## 0.2.14
 
 * **Fix power-cycle Access Denied:** ping/write paths that marked a serial session dead used to skip
