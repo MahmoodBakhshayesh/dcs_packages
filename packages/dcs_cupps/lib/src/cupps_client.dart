@@ -1802,7 +1802,21 @@ class _CuppsSocketSession {
   }
 
   void _onBytes(List<int> bytes) {
-    _decoder.add(bytes);
+    try {
+      _decoder.add(bytes);
+    } catch (error, stackTrace) {
+      // Never let a framing error escape the socket listener as an unhandled zone error.
+      logger(
+        CuppsLogLevel.error,
+        CuppsLogScope.protocol,
+        '$name failed to frame inbound bytes.',
+        direction: CuppsMessageDirection.inbound,
+        deviceId: deviceId,
+        error: error,
+        stackTrace: stackTrace,
+        data: {'bufferedBytes': _decoder.bufferedBytes},
+      );
+    }
     for (final xml in _decoder.takeFrames()) {
       try {
         final envelope = CuppsXml.parseEnvelope(xml);

@@ -97,6 +97,18 @@ void main() {
     ]);
   });
 
+  test('frame decoder survives a frame with invalid UTF-8 and keeps decoding', () {
+    const codec = CuppsFrameCodec();
+    final decoder = CuppsFrameDecoder();
+    // Header for a 3-byte payload, then a lone Latin-1 byte (0xE9) that is not valid UTF-8.
+    final bad = [...'0100000003'.codeUnits, 0x41, 0xE9, 0x42];
+    decoder.add(bad);
+    expect(decoder.takeFrames(), hasLength(1));
+    decoder.add(codec.encode('<ok/>'));
+    expect(decoder.takeFrames(), ['<ok/>']);
+    expect(decoder.bufferedBytes, 0);
+  });
+
   test('authenticate response parser exposes supported devices', () {
     final devices = CuppsXml.devicesFromAuthenticateResponse('''
 <?xml version="1.0" encoding="utf-8"?>

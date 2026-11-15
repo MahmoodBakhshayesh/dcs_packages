@@ -693,7 +693,12 @@ class CuppsDevice {
         busyState: CuppsDeviceState.busy,
         busyMessage: 'Sending AEA command.',
       );
-      if (!result.ok || !waitForDeviceAck) return result;
+      if (!waitForDeviceAck) return result;
+      if (!result.ok) {
+        // No ack will come: drop the registered wait, or later unsolicited reader data is swallowed by it.
+        _sender.cancelInboundAeaWait(id, waitKind);
+        return result;
+      }
 
       final ack = await _sender.waitForInboundAea(
         id,

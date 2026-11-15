@@ -54,7 +54,9 @@ class MrzTd3Document {
         checkDigit(documentNumber) == second[9] &&
         checkDigit(birthDate) == second[19] &&
         checkDigit(expiryDate) == second[27] &&
-        checkDigit(personalNumber) == second[42];
+        // ICAO 9303-4: when the optional data field is all filler, its check digit may be '<' or '0'.
+        (checkDigit(personalNumber) == second[42] ||
+            (second[42] == '<' && personalNumber.replaceAll('<', '').isEmpty));
 
     return MrzTd3Document(
       documentCode: first.substring(0, 2).replaceAll('<', ''),
