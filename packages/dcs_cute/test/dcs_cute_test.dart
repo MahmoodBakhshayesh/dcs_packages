@@ -25,6 +25,19 @@ void main() {
     expect(codec.decodeData(config, packets.single).text, 'TWO');
   });
 
+  test('MATIP decoder skips an undecodable packet and keeps receiving', () {
+    const codec = CuteMatipCodec();
+    const config = CuteSessionConfig();
+    final decoder = CuteMatipDecoder();
+    // Version 1, unknown control command (0xFB), length 4.
+    decoder.add([0x01, 0xFB, 0x00, 0x04]);
+    expect(decoder.takePackets(), isEmpty);
+    decoder.add(codec.textData(config, text: 'NEXT'));
+    final packets = decoder.takePackets();
+    expect(packets, hasLength(1));
+    expect(codec.decodeData(config, packets.single).text, 'NEXT');
+  });
+
   test('session config rejects incoherent multiplex/header combinations', () {
     const config = CuteSessionConfig(
       multiplexMode: CuteMultiplexMode.groupWithFourByteAscu,

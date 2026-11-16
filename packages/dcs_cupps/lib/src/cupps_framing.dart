@@ -89,8 +89,10 @@ class CuppsFrameDecoder {
           .skip(CuppsFrameCodec.headerLength)
           .take(payloadLength)
           .toList();
-      _frames.add(utf8.decode(payload));
+      // Remove the frame before decoding: a frame that cannot be decoded must never stay at the head of the
+      // buffer (it would re-throw on every later chunk and kill the session). Invalid UTF-8 bytes become U+FFFD.
       _buffer.removeRange(0, fullLength);
+      _frames.add(utf8.decode(payload, allowMalformed: true));
     }
   }
 

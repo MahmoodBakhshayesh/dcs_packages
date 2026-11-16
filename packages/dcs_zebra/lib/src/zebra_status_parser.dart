@@ -36,9 +36,9 @@ class ZebraStatusParser {
     // Typical: aaa,b,c,dddd,eee,f,g,h,iii,j,k,l
     final paperOut = _flag(first, 1);
     final paused = _flag(first, 2);
-    final bufferFull = first.length > 4
-        ? (int.tryParse(first[4].trim()) ?? 0) > 0
-        : false;
+    // eee (index 4) is the number of formats in the receive buffer — labels queued, not an error.
+    // f (index 5) is the buffer-full flag.
+    final bufferFull = _flag(first, 5);
 
     var headOpen = false;
     var ribbonOut = false;

@@ -283,8 +283,15 @@ class CuteMatipDecoder {
       if (_buffer.length < length) return;
 
       final frame = _buffer.take(length).toList();
-      _packets.add(_codec.decodePacket(frame));
+      // Remove the frame before decoding: an undecodable packet (unknown command, short body) must not stay at the
+      // head of the buffer, or every later read re-throws and the session never receives another packet.
       _buffer.removeRange(0, length);
+      try {
+        _packets.add(_codec.decodePacket(frame));
+      } on Object {
+        // Skip the bad packet; the stream resyncs on the next version byte.
+        continue;
+      }
     }
   }
 }

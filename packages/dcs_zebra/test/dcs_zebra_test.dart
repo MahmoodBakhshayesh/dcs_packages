@@ -21,6 +21,24 @@ void main() {
       expect(status.hardwareStatusLabel, 'ready');
     });
 
+    test('formats queued in the receive buffer are not buffer-full', () {
+      // eee=002 (two labels queued), f=0 (buffer not full).
+      const raw = '030,0,0,1248,002,0,0,0,000,0,0,0\n'
+          '000,0,0,0,0,2,6,0,00000000,1,000\n'
+          '1234,0';
+      final status = ZebraStatusParser.fromHostStatus(raw, printer: printer);
+      expect(status.bufferFull, isFalse);
+      expect(status.readyToPrint, isTrue);
+    });
+
+    test('parses buffer full flag', () {
+      const raw = '030,0,0,1248,002,1,0,0,000,0,0,0\n'
+          '000,0,0,0,0,2,6,0,00000000,1,000\n'
+          '1234,0';
+      final status = ZebraStatusParser.fromHostStatus(raw, printer: printer);
+      expect(status.bufferFull, isTrue);
+    });
+
     test('parses paper out', () {
       const raw = '030,1,0,1248,000,0,0,0,000,0,0,0\n000,0,0,0,0,2,6,0,00000000,1,000';
       final status = ZebraStatusParser.fromHostStatus(raw, printer: printer);
