@@ -1,3 +1,13 @@
+## 0.2.1
+
+- SITA and RESA FFI calls no longer run on the caller's (UI) isolate. Each `SitaDevice` / `ResaDevice` owns a
+  `CuteFfiWorker` isolate; `XSPMOpen` / `XSPMLock` / `XSPMWrite` (`PM_WAIT`) and `CRW_DM_LOCK` / `CRW_DM_READ` used to
+  freeze the app for up to their wait (lock 10 s, RESA read 5 s, SITA open indefinitely). Same public API, same call
+  order (one call at a time per device), same timeouts and error types.
+- `close()` waits at most 5 s for the worker, so `dispose()` can no longer hang behind a stuck native call; the worker
+  isolate is killed on `dispose()`.
+- Caveat: Dart does not pin an isolate to one OS thread. Not yet run on a CUTE workstation.
+
 ## 0.2.0
 
 - Align SITA `xspmapi.dll` bindings with CUTE/NT SDK **1.34** `XSPMAPI.H`
