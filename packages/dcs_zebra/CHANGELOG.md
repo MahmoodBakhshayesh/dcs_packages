@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+- macOS: Swift Package Manager support (`macos/dcs_zebra/Package.swift`); sources moved to `macos/dcs_zebra/Sources/dcs_zebra/`. The podspec builds the same sources, so CocoaPods keeps working.
+
 ## 0.2.1
 
 - iOS: cast TCP port substring to `NSString` before `integerValue` (Xcode 16 / modern Clang).
