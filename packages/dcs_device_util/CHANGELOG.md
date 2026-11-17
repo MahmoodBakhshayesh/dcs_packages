@@ -1,3 +1,10 @@
+## 0.2.16
+
+* **Web-safe:** `DcsSerialPortAdapter` moved to `dcs_serial_port_adapter_ffi.dart`, exported from
+  `dcs_adapters.dart` only `if (dart.library.ffi)`. Web gets `dcs_serial_port_adapter_stub.dart`: discovery finds
+  no ports and `connect` throws `DcsDeviceConnectionException`. libserialport is a `dart:ffi` binding, so before this
+  any app importing `dcs_device_util` failed to compile for web. Desktop / mobile behaviour is unchanged.
+
 ## 0.2.15
 
 * Response classifier: print-steering prefixes (`CHKINERR3`, `TICKTERR6`, `BOARDERR2`, …) are hard errors.
